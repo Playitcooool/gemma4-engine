@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .backends import BackendName
-from .inference import infer
-from .loader import load_model
+from .inference import Gemma4Engine, PrefillStepSize
 from .stats import RunStats
 
 
@@ -32,22 +31,28 @@ def compare_with_mlx_lm(
     model_path: str,
     max_tokens: int,
     backend: BackendName,
+    prefill_step_size: PrefillStepSize = "auto",
+    kv_bits: int | None = None,
+    kv_group_size: int = 64,
+    quantized_kv_start: int = 0,
 ) -> CompareResult:
     from mlx_lm import stream_generate
 
-    engine = infer(
+    engine = Gemma4Engine(model_path=model_path, backend=backend)
+    engine_result = engine.infer(
         prompt,
-        model_path=model_path,
         max_tokens=max_tokens,
-        backend=backend,
         prompt_mode="raw",
+        prefill_step_size=prefill_step_size,
+        kv_bits=kv_bits,
+        kv_group_size=kv_group_size,
+        quantized_kv_start=quantized_kv_start,
     )
-    loaded = load_model(model_path)
     baseline_text = ""
     baseline_response = None
     for response in stream_generate(
-        loaded.model,
-        loaded.tokenizer,
+        engine.loaded.model,
+        engine.loaded.tokenizer,
         prompt=prompt,
         max_tokens=max_tokens,
     ):
@@ -76,22 +81,22 @@ def compare_with_mlx_lm(
 
     speedup = {
         "prefill": _ratio(
-            engine.stats.prefill_tokens_per_second,
+            engine_result.stats.prefill_tokens_per_second,
             float(baseline_stats["prefill_tokens_per_second"]),
         ),
         "decode": _ratio(
-            engine.stats.decode_tokens_per_second,
+            engine_result.stats.decode_tokens_per_second,
             float(baseline_stats["decode_tokens_per_second"]),
         ),
     }
 
     return CompareResult(
         baseline="mlx_lm",
-        matches=engine.text == baseline_text,
-        engine_tokens=engine.token_ids,
+        matches=engine_result.text == baseline_text,
+        engine_tokens=engine_result.token_ids,
         baseline_text=baseline_text,
-        engine_text=engine.text,
-        engine_stats=engine.stats,
+        engine_text=engine_result.text,
+        engine_stats=engine_result.stats,
         baseline_stats=baseline_stats,
         speedup=speedup,
     )

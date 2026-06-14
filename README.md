@@ -29,7 +29,35 @@ Useful flags:
 ```bash
 gemma4 infer --backend auto --max-tokens 128 --prefill-step-size auto
 gemma4 bench --prompt-tokens 128,512,2048,8192 --decode-tokens 128,512 --json
+gemma4 compare --backend auto --prompt "Say hi." --max-tokens 64
 ```
 
 `--backend auto` uses Rust kernels only after a self-test passes. If the extension is unavailable,
 incorrect, or slower for the local operation, it falls back to MLX.
+
+## Performance Notes
+
+For deployable throughput, keep the model loaded and use the `bench` command or `Gemma4Engine`
+instead of repeatedly starting a new process. The benchmark path reuses one loaded model across
+warmups and measured runs.
+
+The default `--prefill-step-size auto` uses smaller chunks for long prompts to reduce memory
+pressure. On the local target model, the verified fast path is:
+
+```bash
+gemma4 bench --backend mlx --prompt-tokens 128,512,2048,8192 --decode-tokens 64 --warmups 1 --runs 3
+```
+
+For explicit long-context tuning:
+
+```bash
+gemma4 bench --backend mlx --prompt-tokens 8192 --decode-tokens 64 --prefill-step-size 1024 --json
+```
+
+`--backend rust-metal` is currently a correctness/testing path for the Rust extension. The
+production fast path is `--backend auto` or `--backend mlx` until the Rust argmax kernel is fully
+GPU-resident and wins the median-speed gate.
+
+`--kv-bits` is exposed for compatible MLX models, but it is automatically disabled for the current
+Gemma 4 shared-KV checkpoint because upstream `mlx_lm` rotating/shared cache quantization is not
+compatible with this architecture yet.

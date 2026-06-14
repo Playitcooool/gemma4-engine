@@ -28,6 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "512", "1024", "2048", "4096", "8192"],
         default="auto",
     )
+    infer_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
+    infer_parser.add_argument("--kv-group-size", type=int, default=64)
+    infer_parser.add_argument("--quantized-kv-start", type=int, default=0)
     infer_parser.add_argument("--json", action="store_true")
 
     bench_parser = subparsers.add_parser("bench")
@@ -37,6 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
     bench_parser.add_argument("--decode-tokens", default="128,512")
     bench_parser.add_argument("--warmups", type=int, default=1)
     bench_parser.add_argument("--runs", type=int, default=3)
+    bench_parser.add_argument(
+        "--prefill-step-size",
+        choices=["auto", "512", "1024", "2048", "4096", "8192"],
+        default="auto",
+    )
+    bench_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
+    bench_parser.add_argument("--kv-group-size", type=int, default=64)
+    bench_parser.add_argument("--quantized-kv-start", type=int, default=0)
     bench_parser.add_argument("--json", action="store_true")
 
     compare_parser = subparsers.add_parser("compare")
@@ -45,6 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--prompt", required=True)
     compare_parser.add_argument("--max-tokens", type=int, default=64)
     compare_parser.add_argument("--backend", choices=["mlx", "rust-metal", "auto"], default="auto")
+    compare_parser.add_argument(
+        "--prefill-step-size",
+        choices=["auto", "512", "1024", "2048", "4096", "8192"],
+        default="auto",
+    )
+    compare_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
+    compare_parser.add_argument("--kv-group-size", type=int, default=64)
+    compare_parser.add_argument("--quantized-kv-start", type=int, default=0)
     compare_parser.add_argument("--json", action="store_true")
     return parser
 
@@ -61,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
             backend=args.backend,
             prompt_mode=args.prompt_mode,
             prefill_step_size=args.prefill_step_size,
+            kv_bits=args.kv_bits,
+            kv_group_size=args.kv_group_size,
+            quantized_kv_start=args.quantized_kv_start,
         )
         if args.json:
             import json
@@ -101,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
                 decode_lengths=_csv_ints(args.decode_tokens),
                 warmups=args.warmups,
                 runs=args.runs,
+                prefill_step_size=args.prefill_step_size,
+                kv_bits=args.kv_bits,
+                kv_group_size=args.kv_group_size,
+                quantized_kv_start=args.quantized_kv_start,
             ),
         )
         print(benchmark_json(payload) if args.json else benchmark_json(payload))
@@ -112,6 +138,10 @@ def main(argv: list[str] | None = None) -> int:
             model_path=args.model,
             max_tokens=args.max_tokens,
             backend=args.backend,
+            prefill_step_size=args.prefill_step_size,
+            kv_bits=args.kv_bits,
+            kv_group_size=args.kv_group_size,
+            quantized_kv_start=args.quantized_kv_start,
         )
         if args.json:
             import json
