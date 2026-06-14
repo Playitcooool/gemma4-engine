@@ -18,6 +18,8 @@ class BenchConfig:
     kv_bits: int | None = None
     kv_group_size: int = 64
     quantized_kv_start: int = 0
+    draft_model_path: str | None = None
+    draft_tokens: int = 4
 
 
 def synthetic_prompt(token_count: int) -> str:
@@ -31,7 +33,12 @@ def run_benchmark(
     config: BenchConfig,
 ) -> dict[str, object]:
     cases: list[dict[str, object]] = []
-    engine = Gemma4Engine(model_path=model_path, backend=backend)
+    engine = Gemma4Engine(
+        model_path=model_path,
+        backend=backend,
+        draft_model_path=config.draft_model_path,
+        draft_tokens=config.draft_tokens,
+    )
     for prompt_length in config.prompt_lengths:
         for decode_length in config.decode_lengths:
             prompt = synthetic_prompt(prompt_length)

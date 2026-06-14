@@ -96,3 +96,34 @@ GPU-resident and wins the median-speed gate.
 `--kv-bits` is exposed for compatible MLX models, but it is automatically disabled for the current
 Gemma 4 shared-KV checkpoint because upstream `mlx_lm` rotating/shared cache quantization is not
 compatible with this architecture yet.
+
+## Speculative Decoding
+
+Gemma 4 assistant/MTP drafters can be tested explicitly:
+
+```bash
+gemma4 infer \
+  --backend mlx \
+  --draft-model /Volumes/Samsung/lmstudio/lmstudio-community/mlx-community:gemma-4-E4B-it-qat-assistant-4bit \
+  --draft-tokens 4 \
+  --prompt "Say hi."
+```
+
+This path uses `mlx-vlm` for Gemma 4 MTP hooks and includes a local compatibility patch for the
+QAT assistant's quantized sparse embedding head. It is intentionally opt-in: on the local
+`gemma-4-E4B-it-qat-assistant-4bit` drafter, measured decode was slower than the default MLX path
+even with high acceptance, because the current integration loads an `mlx-vlm` target model in
+addition to the normal `mlx-lm` target and pays extra MTP runtime overhead.
+
+Use `--draft-model` for experiments and acceptance-rate reporting, not as the production default
+unless local benchmarks show it wins:
+
+```bash
+gemma4 bench \
+  --backend mlx \
+  --draft-model /Volumes/Samsung/lmstudio/lmstudio-community/mlx-community:gemma-4-E4B-it-qat-assistant-4bit \
+  --draft-tokens 4 \
+  --prompt-tokens 128,512,2048 \
+  --decode-tokens 64 \
+  --json
+```

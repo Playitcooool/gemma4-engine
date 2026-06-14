@@ -39,6 +39,8 @@ class FakeService(EngineService):
             config_warnings=[],
             prefix_cache_hit=False,
             prefix_tokens=0,
+            draft_model_path=None,
+            speculative_acceptance_rate=None,
         )
 
 

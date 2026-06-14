@@ -26,12 +26,19 @@ class ServerConfig:
     default_quantized_kv_start: int = 0
     default_cache_prefix: str | None = None
     default_cache_prefix_mode: PromptMode = "raw"
+    draft_model_path: str | None = None
+    draft_tokens: int = 4
 
 
 class EngineService:
     def __init__(self, config: ServerConfig) -> None:
         self.config = config
-        self.engine = Gemma4Engine(model_path=config.model_path, backend=config.backend)
+        self.engine = Gemma4Engine(
+            model_path=config.model_path,
+            backend=config.backend,
+            draft_model_path=config.draft_model_path,
+            draft_tokens=config.draft_tokens,
+        )
         self._lock = threading.Lock()
 
     def health(self) -> dict[str, Any]:
@@ -42,6 +49,7 @@ class EngineService:
             "backend_selected": self.engine.backend_status.selected,
             "backend_reason": self.engine.backend_status.reason,
             "config_warnings": self.engine.loaded.warnings,
+            "draft_model_path": self.config.draft_model_path,
         }
 
     def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -106,6 +114,8 @@ class EngineService:
             "config_warnings": result.config_warnings,
             "prefix_cache_hit": result.prefix_cache_hit,
             "prefix_tokens": result.prefix_tokens,
+            "draft_model_path": result.draft_model_path,
+            "speculative_acceptance_rate": result.speculative_acceptance_rate,
         }
 
 

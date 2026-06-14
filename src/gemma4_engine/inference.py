@@ -7,6 +7,7 @@ from typing import Literal
 
 from .backends import ArgmaxBackend, BackendName, select_backend
 from .loader import load_model
+from .speculative import SpeculativeRuntime
 from .stats import RunStats, memory_snapshot, now
 
 PromptMode = Literal["chat", "raw"]
@@ -22,6 +23,8 @@ class GenerationResult:
     config_warnings: list[str]
     prefix_cache_hit: bool = False
     prefix_tokens: int = 0
+    draft_model_path: str | None = None
+    speculative_acceptance_rate: float | None = None
 
 
 @dataclass
@@ -35,11 +38,22 @@ class Gemma4Engine:
     model_path: str
     backend: BackendName = "auto"
     max_prefix_cache_entries: int = 4
+    draft_model_path: str | None = None
+    draft_tokens: int = 4
 
     def __post_init__(self) -> None:
         self.loaded = load_model(self.model_path)
         self.argmax_backend, self.backend_status = select_backend(self.backend)
         self._prefix_cache: dict[str, PrefixCacheEntry] = {}
+        self.speculative_runtime = (
+            SpeculativeRuntime(
+                self.model_path,
+                self.draft_model_path,
+                draft_tokens=self.draft_tokens,
+            )
+            if self.draft_model_path
+            else None
+        )
 
     def infer(
         self,
@@ -98,20 +112,46 @@ class Gemma4Engine:
                     "shared-KV caches are incompatible with quantized KV entries"
                 )
 
-        generated, prefill_seconds, decode_seconds, first_token_seconds = (
-            _greedy_generate_tokens(
-                model=self.loaded.model,
-                prompt_ids=prefill_ids,
+        speculative_acceptance_rate = None
+        if (
+            self.speculative_runtime is not None
+            and prompt_cache is None
+            and self.argmax_backend.name == "mlx"
+        ):
+            spec = self.speculative_runtime.generate(
+                prompt_ids,
                 max_tokens=max_tokens,
-                backend=self.argmax_backend,
-                prefill_step_size=_prefill_step_size(prefill_step_size, len(prompt_ids)),
                 eos_token_ids=eos_ids,
-                kv_bits=kv_bits,
-                kv_group_size=kv_group_size,
-                quantized_kv_start=quantized_kv_start,
-                prompt_cache=prompt_cache,
+                prefill_step_size=_prefill_step_size(prefill_step_size, len(prompt_ids)),
             )
-        )
+            generated = spec.token_ids
+            prefill_seconds = spec.prefill_seconds
+            decode_seconds = spec.decode_seconds
+            first_token_seconds = spec.time_to_first_token_seconds
+            total_draft = sum(spec.draft_lengths)
+            speculative_acceptance_rate = (
+                sum(spec.accept_lengths) / total_draft if total_draft else None
+            )
+        else:
+            if self.speculative_runtime is not None and prompt_cache is not None:
+                config_warnings.append(
+                    "draft model disabled for this request because prefix-cache reuse "
+                    "is not wired into the MTP speculative runtime yet"
+                )
+            generated, prefill_seconds, decode_seconds, first_token_seconds = (
+                _greedy_generate_tokens(
+                    model=self.loaded.model,
+                    prompt_ids=prefill_ids,
+                    max_tokens=max_tokens,
+                    backend=self.argmax_backend,
+                    prefill_step_size=_prefill_step_size(prefill_step_size, len(prompt_ids)),
+                    eos_token_ids=eos_ids,
+                    kv_bits=kv_bits,
+                    kv_group_size=kv_group_size,
+                    quantized_kv_start=quantized_kv_start,
+                    prompt_cache=prompt_cache,
+                )
+            )
 
         stats = RunStats(
             model_path=self.model_path,
@@ -131,6 +171,8 @@ class Gemma4Engine:
             config_warnings=config_warnings,
             prefix_cache_hit=prefix_cache_hit,
             prefix_tokens=prefix_tokens,
+            draft_model_path=self.draft_model_path,
+            speculative_acceptance_rate=speculative_acceptance_rate,
         )
 
     def clear_prefix_cache(self) -> None:
@@ -387,8 +429,15 @@ def infer(
     eos_token_id: int | None = None,
     cache_prefix: str | None = None,
     cache_prefix_mode: PromptMode = "raw",
+    draft_model_path: str | None = None,
+    draft_tokens: int = 4,
 ) -> GenerationResult:
-    engine = Gemma4Engine(model_path=model_path, backend=backend)
+    engine = Gemma4Engine(
+        model_path=model_path,
+        backend=backend,
+        draft_model_path=draft_model_path,
+        draft_tokens=draft_tokens,
+    )
     return engine.infer(
         prompt,
         max_tokens=max_tokens,

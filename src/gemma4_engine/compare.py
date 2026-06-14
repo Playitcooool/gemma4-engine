@@ -35,10 +35,17 @@ def compare_with_mlx_lm(
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
+    draft_model_path: str | None = None,
+    draft_tokens: int = 4,
 ) -> CompareResult:
     from mlx_lm import stream_generate
 
-    engine = Gemma4Engine(model_path=model_path, backend=backend)
+    engine = Gemma4Engine(
+        model_path=model_path,
+        backend=backend,
+        draft_model_path=draft_model_path,
+        draft_tokens=draft_tokens,
+    )
     engine_result = engine.infer(
         prompt,
         max_tokens=max_tokens,
