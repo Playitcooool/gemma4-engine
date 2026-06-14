@@ -24,6 +24,8 @@ class ServerConfig:
     default_kv_bits: int | None = None
     default_kv_group_size: int = 64
     default_quantized_kv_start: int = 0
+    default_cache_prefix: str | None = None
+    default_cache_prefix_mode: PromptMode = "raw"
 
 
 class EngineService:
@@ -72,6 +74,16 @@ class EngineService:
         quantized_kv_start = int(
             payload.get("quantized_kv_start", self.config.default_quantized_kv_start)
         )
+        cache_prefix = payload.get("cache_prefix", self.config.default_cache_prefix)
+        if cache_prefix is not None and not isinstance(cache_prefix, str):
+            raise ValueError("cache_prefix must be a string when provided")
+
+        cache_prefix_mode = payload.get(
+            "cache_prefix_mode",
+            self.config.default_cache_prefix_mode,
+        )
+        if cache_prefix_mode not in ("chat", "raw"):
+            raise ValueError("cache_prefix_mode must be 'chat' or 'raw'")
 
         with self._lock:
             result = self.engine.infer(
@@ -82,6 +94,8 @@ class EngineService:
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
+                cache_prefix=cache_prefix,
+                cache_prefix_mode=cache_prefix_mode,
             )
 
         return {
@@ -90,6 +104,8 @@ class EngineService:
             "stats": result.stats.to_dict(),
             "backend_reason": result.backend_reason,
             "config_warnings": result.config_warnings,
+            "prefix_cache_hit": result.prefix_cache_hit,
+            "prefix_tokens": result.prefix_tokens,
         }
 
 

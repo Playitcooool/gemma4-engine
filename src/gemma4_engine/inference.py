@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 from dataclasses import dataclass
 from typing import Literal
 
@@ -18,16 +20,26 @@ class GenerationResult:
     stats: RunStats
     backend_reason: str
     config_warnings: list[str]
+    prefix_cache_hit: bool = False
+    prefix_tokens: int = 0
+
+
+@dataclass
+class PrefixCacheEntry:
+    token_ids: list[int]
+    cache: list[object]
 
 
 @dataclass
 class Gemma4Engine:
     model_path: str
     backend: BackendName = "auto"
+    max_prefix_cache_entries: int = 4
 
     def __post_init__(self) -> None:
         self.loaded = load_model(self.model_path)
         self.argmax_backend, self.backend_status = select_backend(self.backend)
+        self._prefix_cache: dict[str, PrefixCacheEntry] = {}
 
     def infer(
         self,
@@ -40,9 +52,37 @@ class Gemma4Engine:
         kv_group_size: int = 64,
         quantized_kv_start: int = 0,
         eos_token_id: int | None = None,
+        cache_prefix: str | None = None,
+        cache_prefix_mode: PromptMode = "raw",
     ) -> GenerationResult:
         prompt_text = _format_prompt(self.loaded.tokenizer, prompt, prompt_mode)
         prompt_ids = _encode(self.loaded.tokenizer, prompt_text)
+        prefix_cache_hit = False
+        prefix_tokens = 0
+        prompt_cache = None
+        prefill_ids = prompt_ids
+        prefix_cache_build_seconds = 0.0
+
+        if cache_prefix:
+            prefix_text = _format_prompt(self.loaded.tokenizer, cache_prefix, cache_prefix_mode)
+            prefix_ids = _encode(self.loaded.tokenizer, prefix_text)
+            if prompt_ids[: len(prefix_ids)] == prefix_ids:
+                suffix_ids = prompt_ids[len(prefix_ids) :]
+            else:
+                suffix_ids = prompt_ids
+                prompt_ids = prefix_ids + suffix_ids
+
+            cached, prefix_cache_hit, prefix_cache_build_seconds = (
+                self._get_or_create_prefix_cache(
+                    prefix_ids,
+                    prefill_step_size=_prefill_step_size(prefill_step_size, len(prefix_ids)),
+                )
+            )
+            if cached is not None:
+                prompt_cache = _clone_prompt_cache(cached.cache)
+                prefill_ids = suffix_ids
+                prefix_tokens = len(prefix_ids)
+
         eos_ids = set(getattr(self.loaded.tokenizer, "eos_token_ids", []) or [])
         if eos_token_id is None:
             eos_token_id = getattr(self.loaded.tokenizer, "eos_token_id", None)
@@ -61,7 +101,7 @@ class Gemma4Engine:
         generated, prefill_seconds, decode_seconds, first_token_seconds = (
             _greedy_generate_tokens(
                 model=self.loaded.model,
-                prompt_ids=prompt_ids,
+                prompt_ids=prefill_ids,
                 max_tokens=max_tokens,
                 backend=self.argmax_backend,
                 prefill_step_size=_prefill_step_size(prefill_step_size, len(prompt_ids)),
@@ -69,6 +109,7 @@ class Gemma4Engine:
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
+                prompt_cache=prompt_cache,
             )
         )
 
@@ -77,9 +118,9 @@ class Gemma4Engine:
             backend=self.backend_status.selected,
             prompt_tokens=len(prompt_ids),
             generated_tokens=len(generated),
-            prefill_seconds=prefill_seconds,
+            prefill_seconds=prefill_seconds + prefix_cache_build_seconds,
             decode_seconds=decode_seconds,
-            time_to_first_token_seconds=first_token_seconds,
+            time_to_first_token_seconds=first_token_seconds + prefix_cache_build_seconds,
             **memory_snapshot(),
         )
         return GenerationResult(
@@ -88,7 +129,64 @@ class Gemma4Engine:
             stats=stats,
             backend_reason=self.backend_status.reason,
             config_warnings=config_warnings,
+            prefix_cache_hit=prefix_cache_hit,
+            prefix_tokens=prefix_tokens,
         )
+
+    def clear_prefix_cache(self) -> None:
+        self._prefix_cache.clear()
+
+    def _get_or_create_prefix_cache(
+        self,
+        prefix_ids: list[int],
+        *,
+        prefill_step_size: int,
+    ) -> tuple[PrefixCacheEntry | None, bool, float]:
+        if len(prefix_ids) < 2:
+            return None, False, 0.0
+
+        key = _prefix_cache_key(prefix_ids)
+        existing = self._prefix_cache.get(key)
+        if existing is not None:
+            return existing, True, 0.0
+
+        import mlx.core as mx
+        from mlx_lm.models import cache
+
+        prompt_cache = cache.make_prompt_cache(self.loaded.model)
+        prompt = mx.array(prefix_ids)
+        processed = 0
+        build_start = now()
+        while len(prompt) - processed > 0:
+            count = min(prefill_step_size, len(prompt) - processed)
+            self.loaded.model(prompt[processed : processed + count][None], cache=prompt_cache)
+            mx.eval([entry.state for entry in prompt_cache])
+            processed += count
+            mx.clear_cache()
+        build_seconds = now() - build_start
+
+        entry = PrefixCacheEntry(token_ids=list(prefix_ids), cache=_clone_prompt_cache(prompt_cache))
+        if len(self._prefix_cache) >= self.max_prefix_cache_entries:
+            self._prefix_cache.pop(next(iter(self._prefix_cache)))
+        self._prefix_cache[key] = entry
+        return entry, False, build_seconds
+
+
+def _prefix_cache_key(token_ids: list[int]) -> str:
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(len(token_ids).to_bytes(8, "little"))
+    for token_id in token_ids:
+        digest.update(int(token_id).to_bytes(4, "little", signed=True))
+    return digest.hexdigest()
+
+
+def _clone_prompt_cache(prompt_cache: list[object]) -> list[object]:
+    from mlx_lm.models import cache
+
+    cloned = []
+    for entry in prompt_cache:
+        cloned.append(type(entry).from_state(copy.deepcopy(entry.state), copy.deepcopy(entry.meta_state)))
+    return cloned
 
 
 def _format_prompt(tokenizer: object, prompt: str, mode: PromptMode) -> str:
@@ -135,6 +233,7 @@ def _greedy_generate_tokens(
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
+    prompt_cache: list[object] | None = None,
 ) -> tuple[list[int], float, float, float]:
     if backend.name == "mlx":
         return _greedy_generate_tokens_mlx(
@@ -146,13 +245,14 @@ def _greedy_generate_tokens(
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
+            prompt_cache=prompt_cache,
         )
 
     import mlx.core as mx
     from mlx_lm.models import cache
 
     prompt = mx.array(prompt_ids)
-    prompt_cache = cache.make_prompt_cache(model)
+    prompt_cache = prompt_cache or cache.make_prompt_cache(model)
     processed = 0
 
     prefill_start = now()
@@ -197,13 +297,14 @@ def _greedy_generate_tokens_mlx(
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
+    prompt_cache: list[object] | None = None,
 ) -> tuple[list[int], float, float, float]:
     import mlx.core as mx
     from mlx_lm.generate import generation_stream, wired_limit
     from mlx_lm.models import cache
 
     prompt = mx.array(prompt_ids)
-    prompt_cache = cache.make_prompt_cache(model)
+    prompt_cache = prompt_cache or cache.make_prompt_cache(model)
     processed = 0
 
     def quantize_supported_cache_entries() -> None:
@@ -284,6 +385,8 @@ def infer(
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
     eos_token_id: int | None = None,
+    cache_prefix: str | None = None,
+    cache_prefix_mode: PromptMode = "raw",
 ) -> GenerationResult:
     engine = Gemma4Engine(model_path=model_path, backend=backend)
     return engine.infer(
@@ -295,4 +398,6 @@ def infer(
         kv_group_size=kv_group_size,
         quantized_kv_start=quantized_kv_start,
         eos_token_id=eos_token_id,
+        cache_prefix=cache_prefix,
+        cache_prefix_mode=cache_prefix_mode,
     )

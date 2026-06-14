@@ -14,6 +14,13 @@ def _csv_ints(value: str) -> list[int]:
     return [int(part.strip()) for part in value.split(",") if part.strip()]
 
 
+def _read_optional_text(value: str | None, file_path: str | None) -> str | None:
+    if file_path:
+        with open(file_path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gemma4")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -32,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     infer_parser.add_argument("--kv-group-size", type=int, default=64)
     infer_parser.add_argument("--quantized-kv-start", type=int, default=0)
+    infer_parser.add_argument("--cache-prefix", default=None)
+    infer_parser.add_argument("--cache-prefix-file", default=None)
+    infer_parser.add_argument("--cache-prefix-mode", choices=["chat", "raw"], default="raw")
     infer_parser.add_argument("--json", action="store_true")
 
     bench_parser = subparsers.add_parser("bench")
@@ -82,6 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     serve_parser.add_argument("--kv-group-size", type=int, default=64)
     serve_parser.add_argument("--quantized-kv-start", type=int, default=0)
+    serve_parser.add_argument("--cache-prefix", default=None)
+    serve_parser.add_argument("--cache-prefix-file", default=None)
+    serve_parser.add_argument("--cache-prefix-mode", choices=["chat", "raw"], default="raw")
     return parser
 
 
@@ -100,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
             quantized_kv_start=args.quantized_kv_start,
+            cache_prefix=_read_optional_text(args.cache_prefix, args.cache_prefix_file),
+            cache_prefix_mode=args.cache_prefix_mode,
         )
         if args.json:
             import json
@@ -112,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
                         "stats": result.stats.to_dict(),
                         "backend_reason": result.backend_reason,
                         "config_warnings": result.config_warnings,
+                        "prefix_cache_hit": result.prefix_cache_hit,
+                        "prefix_tokens": result.prefix_tokens,
                     },
                     indent=2,
                     sort_keys=True,
@@ -127,6 +144,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"ttft: {result.stats.time_to_first_token_seconds:.3f}s",
                 file=sys.stderr,
             )
+            if result.prefix_tokens:
+                print(
+                    f"prefix cache: hit={result.prefix_cache_hit}, "
+                    f"tokens={result.prefix_tokens}",
+                    file=sys.stderr,
+                )
             for warning in result.config_warnings:
                 print(f"config warning: {warning}", file=sys.stderr)
         return 0
@@ -223,6 +246,11 @@ def main(argv: list[str] | None = None) -> int:
                 default_kv_bits=args.kv_bits,
                 default_kv_group_size=args.kv_group_size,
                 default_quantized_kv_start=args.quantized_kv_start,
+                default_cache_prefix=_read_optional_text(
+                    args.cache_prefix,
+                    args.cache_prefix_file,
+                ),
+                default_cache_prefix_mode=args.cache_prefix_mode,
             )
         )
         return 0

@@ -61,6 +61,21 @@ The service loads the model once at startup and serializes generation with a pro
 This keeps throughput stable for repeated task requests while avoiding concurrent mutation of the
 MLX KV cache state.
 
+For repeated tasks with the same long document or system prefix, enable prefix caching:
+
+```bash
+gemma4 infer \
+  --cache-prefix-file shared_context.txt \
+  --cache-prefix-mode raw \
+  --prompt "$(cat shared_context.txt) Question: summarize the key risks." \
+  --prompt-mode raw
+```
+
+The prompt should include the exact prefix text for token-for-token equivalence. Tokenizers can
+merge text across prefix/suffix boundaries, so independently tokenizing a prefix and suffix is not
+always identical to tokenizing the concatenated prompt. On repeated exact-prefix requests, the
+engine reuses the prefetched KV cache and only prefills the suffix.
+
 The default `--prefill-step-size auto` uses smaller chunks for long prompts to reduce memory
 pressure. On the local target model, the verified fast path is:
 

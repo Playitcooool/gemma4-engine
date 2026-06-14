@@ -37,6 +37,8 @@ class FakeService(EngineService):
             ),
             backend_reason="test",
             config_warnings=[],
+            prefix_cache_hit=False,
+            prefix_tokens=0,
         )
 
 
@@ -61,6 +63,8 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
 
     assert response["text"] == "ok"
     assert response["stats"]["decode_tokens_per_second"] == 8.0
+    assert response["prefix_cache_hit"] is False
+    assert response["prefix_tokens"] == 0
     assert service._seen["prompt"] == "hello"
     assert service._seen["max_tokens"] == 4
     assert service._seen["prompt_mode"] == "raw"
