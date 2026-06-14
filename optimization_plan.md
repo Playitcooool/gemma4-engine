@@ -25,7 +25,7 @@ Dynamic graph building in Python during decoding incurs high runtime overhead. C
 
 ### Action Items
 1. **Compile the Decode Step Function**:
-   - In [inference.py](file:///Volumes/Samsung/Projects/gemma4-engine/src/gemma4_engine/inference.py#L554-L557), compile the `step` function:
+   - In [inference.py](file:///Volumes/Samsung/Projects/gemma4-engine/gemma4_engine/inference.py#L554-L557), compile the `step` function:
      ```python
      compiled_step = mx.compile(step)
      ```
@@ -40,10 +40,10 @@ The prefill phase chunking incurs CPU-GPU synchronization stalls and allocator t
 
 ### Action Items
 1. **Transition to Asynchronous Evaluation**:
-   - Avoid executing `mx.eval` on the prompt cache states after every single prefill chunk in [inference.py](file:///Volumes/Samsung/Projects/gemma4-engine/src/gemma4_engine/inference.py#L565-L566).
+   - Avoid executing `mx.eval` on the prompt cache states after every single prefill chunk in [inference.py](file:///Volumes/Samsung/Projects/gemma4-engine/gemma4_engine/inference.py#L565-L566).
    - Use `mx.async_eval` or queue the evaluations to the stream, performing a single blocking synchronization (`mx.eval`) only on the final chunk.
 2. **Minimize Allocator Cache Clearing**:
-   - Update the default `--prefill-cache-policy` from `clear` to `retain` in [backends.py](file:///Volumes/Samsung/Projects/gemma4-engine/src/gemma4_engine/backends.py) / [cli.py](file:///Volumes/Samsung/Projects/gemma4-engine/src/gemma4_engine/cli.py#L129). Calling `mx.clear_cache()` inside the chunk loop forces constant deallocations and reallocations.
+   - Update the default `--prefill-cache-policy` from `clear` to `retain` in [backends.py](file:///Volumes/Samsung/Projects/gemma4-engine/gemma4_engine/backends.py) / [cli.py](file:///Volumes/Samsung/Projects/gemma4-engine/gemma4_engine/cli.py#L129). Calling `mx.clear_cache()` inside the chunk loop forces constant deallocations and reallocations.
 
 ---
 
@@ -53,7 +53,7 @@ Prefix cache reuse is slowed down by cloning operations that deep-copy underlyin
 
 ### Action Items
 1. **Bypass `copy.deepcopy` for MLX Arrays**:
-   - In `_clone_prompt_cache` in [inference.py](file:///Volumes/Samsung/Projects/gemma4-engine/src/gemma4_engine/inference.py#L292-L298), perform shallow copying of metadata and call MLX's native copy (`mx.copy()` or slicing) on the actual array states. This will eliminate heavy Python object traversal and reflection overhead.
+   - In `_clone_prompt_cache` in [inference.py](file:///Volumes/Samsung/Projects/gemma4-engine/gemma4_engine/inference.py#L292-L298), perform shallow copying of metadata and call MLX's native copy (`mx.copy()` or slicing) on the actual array states. This will eliminate heavy Python object traversal and reflection overhead.
 
 ---
 
@@ -63,7 +63,7 @@ Currently, speculative decoding cannot utilize the prefill prefix cache, limitin
 
 ### Action Items
 1. **Wire Prefix Cache into target/draft models**:
-   - Modify `SpeculativeRuntime.generate` in [speculative.py](file:///Volumes/Samsung/Projects/gemma4-engine/src/gemma4_engine/speculative.py#L31-L90) to accept a target model prefix cache.
+   - Modify `SpeculativeRuntime.generate` in [speculative.py](file:///Volumes/Samsung/Projects/gemma4-engine/gemma4_engine/speculative.py#L31-L90) to accept a target model prefix cache.
    - Adapt the draft model (drafter) to also leverage a matching prefix cache so that prefill computation is avoided for both models when a cache hit occurs.
 
 ---
@@ -74,5 +74,5 @@ Currently, tokenized prefix outputs grow indefinitely on disk, which could event
 
 ### Action Items
 1. **Implement LRU Disk Pruning**:
-   - Enhance the `HierarchicalTokenCache` in [token_cache.py](file:///Volumes/Samsung/Projects/gemma4-engine/src/gemma4_engine/token_cache.py) with a maximum disk storage limit (e.g. 500 MB).
+   - Enhance the `HierarchicalTokenCache` in [token_cache.py](file:///Volumes/Samsung/Projects/gemma4-engine/gemma4_engine/token_cache.py) with a maximum disk storage limit (e.g. 500 MB).
    - Track cache access times and delete the least recently used `.g4tokens` files when the disk folder exceeds the threshold.
