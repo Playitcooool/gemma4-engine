@@ -174,9 +174,14 @@ def make_handler(service: EngineService) -> type[BaseHTTPRequestHandler]:
 def run_server(config: ServerConfig) -> None:
     service = EngineService(config)
     server = HTTPServer((config.host, config.port), make_handler(service))
+    draft_label = (
+        f" speculative=experimental draft={config.draft_model_path}"
+        if config.draft_model_path
+        else ""
+    )
     print(
         f"gemma4 serve listening on http://{config.host}:{config.port} "
-        f"backend={service.engine.backend_status.selected}",
+        f"backend={service.engine.backend_status.selected}{draft_label}",
         flush=True,
     )
     server.serve_forever()

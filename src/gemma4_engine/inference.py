@@ -7,7 +7,6 @@ from typing import Literal
 
 from .backends import ArgmaxBackend, BackendName, select_backend
 from .loader import load_model
-from .speculative import SpeculativeRuntime
 from .stats import RunStats, memory_snapshot, now
 
 PromptMode = Literal["chat", "raw"]
@@ -33,6 +32,13 @@ class PrefixCacheEntry:
     cache: list[object]
 
 
+SPECULATIVE_INSTALL_MESSAGE = (
+    "Speculative decoding is experimental and requires optional dependencies. "
+    "Install them with `uv sync --extra speculative` or "
+    "`pip install 'gemma4-engine[speculative]'`."
+)
+
+
 @dataclass
 class Gemma4Engine:
     model_path: str
@@ -46,7 +52,7 @@ class Gemma4Engine:
         self.argmax_backend, self.backend_status = select_backend(self.backend)
         self._prefix_cache: dict[str, PrefixCacheEntry] = {}
         self.speculative_runtime = (
-            SpeculativeRuntime(
+            _create_speculative_runtime(
                 self.model_path,
                 self.draft_model_path,
                 draft_tokens=self.draft_tokens,
@@ -144,7 +150,7 @@ class Gemma4Engine:
                     prompt_ids=prefill_ids,
                     max_tokens=max_tokens,
                     backend=self.argmax_backend,
-                    prefill_step_size=_prefill_step_size(prefill_step_size, len(prompt_ids)),
+                    prefill_step_size=_prefill_step_size(prefill_step_size, len(prefill_ids)),
                     eos_token_ids=eos_ids,
                     kv_bits=kv_bits,
                     kv_group_size=kv_group_size,
@@ -231,6 +237,26 @@ def _clone_prompt_cache(prompt_cache: list[object]) -> list[object]:
     return cloned
 
 
+def _create_speculative_runtime(
+    target_model_path: str,
+    draft_model_path: str,
+    *,
+    draft_tokens: int,
+) -> object:
+    try:
+        from .speculative import SpeculativeRuntime
+
+        return SpeculativeRuntime(
+            target_model_path,
+            draft_model_path,
+            draft_tokens=draft_tokens,
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name and (exc.name == "mlx_vlm" or exc.name.startswith("mlx_vlm.")):
+            raise RuntimeError(SPECULATIVE_INSTALL_MESSAGE) from exc
+        raise
+
+
 def _format_prompt(tokenizer: object, prompt: str, mode: PromptMode) -> str:
     if mode == "raw":
         return prompt
@@ -258,8 +284,6 @@ def _decode(tokenizer: object, token_ids: list[int]) -> str:
 
 def _prefill_step_size(value: PrefillStepSize, prompt_tokens: int) -> int:
     if value == "auto":
-        if prompt_tokens >= 2048:
-            return 1024
         return 512
     return int(value)
 

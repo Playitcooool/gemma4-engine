@@ -13,28 +13,37 @@ Python/MLX handles model loading and execution through `mlx_lm`. Optional Rust/M
 
 ```bash
 uv venv
-uv sync --extra dev
+uv sync
 ```
 
 ## CLI
 
+The default flow is intentionally small:
+
 ```bash
-gemma4 infer --prompt "Write a haiku about MLX."
-gemma4 bench
-gemma4 compare --baseline mlx_lm --prompt "Explain KV cache in one sentence."
-gemma4 serve --host 127.0.0.1 --port 8000
+gemma4 serve
+gemma4 infer --prompt "Say hi."
 ```
 
 Useful flags:
 
 ```bash
+gemma4 serve --host 127.0.0.1 --port 8000
+gemma4 infer --prompt "Write a haiku about MLX." --max-tokens 128
 gemma4 infer --backend auto --max-tokens 128 --prefill-step-size auto
 gemma4 bench --prompt-tokens 128,512,2048,8192 --decode-tokens 128,512 --json
 gemma4 compare --backend auto --prompt "Say hi." --max-tokens 64
 ```
 
-`--backend auto` uses Rust kernels only after a self-test passes. If the extension is unavailable,
-incorrect, or slower for the local operation, it falls back to MLX.
+`--backend auto` keeps the production generation path on MLX. Rust argmax is currently a
+correctness/testing path and is used only when explicitly requested or after it can beat the MLX
+path without CPU copies. `--backend auto` never selects speculative decoding.
+
+For development tools:
+
+```bash
+uv sync --extra dev
+```
 
 ## Performance Notes
 
@@ -76,8 +85,9 @@ merge text across prefix/suffix boundaries, so independently tokenizing a prefix
 always identical to tokenizing the concatenated prompt. On repeated exact-prefix requests, the
 engine reuses the prefetched KV cache and only prefills the suffix.
 
-The default `--prefill-step-size auto` uses smaller chunks for long prompts to reduce memory
-pressure. On the local target model, the verified fast path is:
+The default `--prefill-step-size auto` uses 512-token prefill chunks. On the local target model,
+512 beat larger chunk candidates in a bounded prefill-focused benchmark at 2048 and 8192 prompt
+tokens while also using less peak memory. The verified smoke path is:
 
 ```bash
 gemma4 bench --backend mlx --prompt-tokens 128,512,2048,8192 --decode-tokens 64 --warmups 1 --runs 3
@@ -99,6 +109,19 @@ compatible with this architecture yet.
 
 ## Speculative Decoding
 
+Speculative decoding is experimental and not part of the default install or serving path. Install
+the optional dependencies only when testing a drafter:
+
+```bash
+uv sync --extra speculative
+```
+
+For package installs, use:
+
+```bash
+pip install 'gemma4-engine[speculative]'
+```
+
 Gemma 4 assistant/MTP drafters can be tested explicitly:
 
 ```bash
@@ -109,8 +132,9 @@ gemma4 infer \
   --prompt "Say hi."
 ```
 
-This path uses `mlx-vlm` for Gemma 4 MTP hooks and includes a local compatibility patch for the
-QAT assistant's quantized sparse embedding head. It is intentionally opt-in: on the local
+This path uses the optional `mlx-vlm` package for Gemma 4 MTP hooks and includes a local
+compatibility patch for the QAT assistant's quantized sparse embedding head. It is intentionally
+opt-in: on the local
 `gemma-4-E4B-it-qat-assistant-4bit` drafter, measured decode was slower than the default MLX path
 even with high acceptance, because the current integration loads an `mlx-vlm` target model in
 addition to the normal `mlx-lm` target and pays extra MTP runtime overhead.
