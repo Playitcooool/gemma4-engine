@@ -45,6 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--prompt", required=True)
     compare_parser.add_argument("--max-tokens", type=int, default=64)
     compare_parser.add_argument("--backend", choices=["mlx", "rust-metal", "auto"], default="auto")
+    compare_parser.add_argument("--json", action="store_true")
     return parser
 
 
@@ -112,8 +113,49 @@ def main(argv: list[str] | None = None) -> int:
             max_tokens=args.max_tokens,
             backend=args.backend,
         )
+        if args.json:
+            import json
+
+            print(
+                json.dumps(
+                    {
+                        "baseline": result.baseline,
+                        "matches": result.matches,
+                        "engine": {
+                            "text": result.engine_text,
+                            "token_ids": result.engine_tokens,
+                            "stats": result.engine_stats.to_dict(),
+                        },
+                        "baseline_stats": result.baseline_stats,
+                        "speedup": result.speedup,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0 if result.matches else 1
+
         print(f"baseline: {result.baseline}")
         print(f"matches: {result.matches}")
+        print(
+            "engine: "
+            f"backend={result.engine_stats.backend}, "
+            f"prefill={result.engine_stats.prefill_tokens_per_second:.2f} tok/s, "
+            f"decode={result.engine_stats.decode_tokens_per_second:.2f} tok/s, "
+            f"ttft={result.engine_stats.time_to_first_token_seconds:.3f}s"
+        )
+        print(
+            "baseline: "
+            f"backend={result.baseline_stats['backend']}, "
+            f"prefill={float(result.baseline_stats['prefill_tokens_per_second']):.2f} tok/s, "
+            f"decode={float(result.baseline_stats['decode_tokens_per_second']):.2f} tok/s"
+        )
+        if result.speedup["prefill"] is not None and result.speedup["decode"] is not None:
+            print(
+                "speedup: "
+                f"prefill={result.speedup['prefill']:.2f}x, "
+                f"decode={result.speedup['decode']:.2f}x"
+            )
         if not result.matches:
             print("engine:")
             print(result.engine_text)
