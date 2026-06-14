@@ -7,6 +7,7 @@ from .benchmark import BenchConfig, benchmark_json, run_benchmark
 from .compare import compare_with_mlx_lm
 from .constants import DEFAULT_MODEL_PATH
 from .inference import infer
+from .server import ServerConfig, run_server
 
 
 def _csv_ints(value: str) -> list[int]:
@@ -65,6 +66,22 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--kv-group-size", type=int, default=64)
     compare_parser.add_argument("--quantized-kv-start", type=int, default=0)
     compare_parser.add_argument("--json", action="store_true")
+
+    serve_parser = subparsers.add_parser("serve")
+    serve_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
+    serve_parser.add_argument("--backend", choices=["mlx", "rust-metal", "auto"], default="auto")
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8000)
+    serve_parser.add_argument("--max-tokens", type=int, default=128)
+    serve_parser.add_argument("--prompt-mode", choices=["chat", "raw"], default="chat")
+    serve_parser.add_argument(
+        "--prefill-step-size",
+        choices=["auto", "512", "1024", "2048", "4096", "8192"],
+        default="auto",
+    )
+    serve_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
+    serve_parser.add_argument("--kv-group-size", type=int, default=64)
+    serve_parser.add_argument("--quantized-kv-start", type=int, default=0)
     return parser
 
 
@@ -192,6 +209,23 @@ def main(argv: list[str] | None = None) -> int:
             print("baseline:")
             print(result.baseline_text)
         return 0 if result.matches else 1
+
+    if args.command == "serve":
+        run_server(
+            ServerConfig(
+                model_path=args.model,
+                backend=args.backend,
+                host=args.host,
+                port=args.port,
+                default_max_tokens=args.max_tokens,
+                default_prompt_mode=args.prompt_mode,
+                default_prefill_step_size=args.prefill_step_size,
+                default_kv_bits=args.kv_bits,
+                default_kv_group_size=args.kv_group_size,
+                default_quantized_kv_start=args.quantized_kv_start,
+            )
+        )
+        return 0
 
     parser.error(f"unknown command: {args.command}")
     return 2

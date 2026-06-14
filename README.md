@@ -22,6 +22,7 @@ uv sync --extra dev
 gemma4 infer --prompt "Write a haiku about MLX."
 gemma4 bench
 gemma4 compare --baseline mlx_lm --prompt "Explain KV cache in one sentence."
+gemma4 serve --host 127.0.0.1 --port 8000
 ```
 
 Useful flags:
@@ -40,6 +41,25 @@ incorrect, or slower for the local operation, it falls back to MLX.
 For deployable throughput, keep the model loaded and use the `bench` command or `Gemma4Engine`
 instead of repeatedly starting a new process. The benchmark path reuses one loaded model across
 warmups and measured runs.
+
+For a persistent local service, run:
+
+```bash
+gemma4 serve --backend auto --host 127.0.0.1 --port 8000
+```
+
+Then call:
+
+```bash
+curl -s http://127.0.0.1:8000/health
+curl -s http://127.0.0.1:8000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Say hi.","max_tokens":64,"prompt_mode":"chat"}'
+```
+
+The service loads the model once at startup and serializes generation with a process-local lock.
+This keeps throughput stable for repeated task requests while avoiding concurrent mutation of the
+MLX KV cache state.
 
 The default `--prefill-step-size auto` uses smaller chunks for long prompts to reduce memory
 pressure. On the local target model, the verified fast path is:
