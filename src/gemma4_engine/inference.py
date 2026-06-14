@@ -91,11 +91,11 @@ def _greedy_generate_tokens(
 
     for index in range(max_tokens):
         next_token = backend.argmax(next_logits[0])
-        generated.append(next_token)
         if index == 0:
             first_token_seconds = now() - prefill_start
         if next_token in eos_token_ids:
             break
+        generated.append(next_token)
         next_logits = model(mx.array([[next_token]]), cache=prompt_cache)[:, -1, :]
         mx.eval(next_logits)
 
