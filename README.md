@@ -31,7 +31,7 @@ Useful flags:
 gemma4 serve --host 127.0.0.1 --port 8000
 gemma4 infer --prompt "Write a haiku about MLX." --max-tokens 128
 gemma4 infer --backend auto --max-tokens 128 --prefill-step-size auto
-gemma4 bench --prompt-tokens 128,512,2048,8192 --decode-tokens 128,512 --json
+gemma4 bench --prompt-tokens 128,512,2048 --decode-tokens 64,128,256 --json
 gemma4 compare --backend auto --prompt "Say hi." --max-tokens 64
 ```
 
@@ -49,7 +49,8 @@ uv sync --extra dev
 
 For deployable throughput, keep the model loaded and use the `bench` command or `Gemma4Engine`
 instead of repeatedly starting a new process. The benchmark path reuses one loaded model across
-warmups and measured runs.
+warmups and measured runs, then compares internal decode variants against the current custom MLX
+greedy loop.
 
 For a persistent local service, run:
 
@@ -102,11 +103,86 @@ gemma4 infer --token-cache-dir "" --prompt "Say hi."
 
 The default `--prefill-step-size auto` uses 512-token prefill chunks. On the local target model,
 512 beat larger chunk candidates in a bounded prefill-focused benchmark at 2048 and 8192 prompt
-tokens while also using less peak memory. The verified smoke path is:
+tokens while also using less peak memory. Decode optimization is benchmark-gated: a candidate must
+match baseline token IDs, improve median decode tok/s by at least 5%, and keep peak-memory
+regression at or below 0.5 GB before it should become the default path. The verified smoke path is:
 
 ```bash
-gemma4 bench --backend mlx --prompt-tokens 128,512,2048,8192 --decode-tokens 64 --warmups 1 --runs 3
+gemma4 bench --backend mlx --prompt-tokens 128,512,2048 --decode-tokens 64,128,256 --warmups 1 --runs 3
 ```
+
+The benchmark compares the current prefill allocator-cache behavior (`clear`) with a high-memory
+candidate (`retain`) that avoids `mx.clear_cache()` between prefill chunks. Use `retain` only when
+you want to spend more GPU memory to test whether larger allocator residency improves throughput:
+
+```bash
+gemma4 bench --backend mlx --prefill-cache-policy retain --prompt-tokens 2048 --decode-tokens 256 --json
+gemma4 infer --prompt "Say hi." --prefill-cache-policy retain --max-kv-size 4096
+```
+
+To tune prefill chunking directly, run a matrix and check `promotion_analysis`:
+
+```bash
+gemma4 bench \
+  --backend mlx \
+  --prompt-tokens 512,2048 \
+  --decode-tokens 64 \
+  --prefill-step-sizes auto,1024,2048,4096 \
+  --prefill-cache-policy clear \
+  --decode-variants custom \
+  --json
+```
+
+To test whether prefill cache-state synchronization is limiting throughput, add
+`--prefill-sync-policies eval,async,none`. `eval` is the default and strongest synchronization
+barrier. `async` schedules cache-state evaluation without blocking immediately, and `none` relies on
+the next model call/final token eval to force dependencies. Benchmark JSON includes a separate
+`prefill_promotion_analysis` so prefill-only wins are evaluated without confusing them with decode
+loop promotion:
+
+```bash
+gemma4 bench \
+  --backend mlx \
+  --prompt-tokens 512 \
+  --decode-tokens 64 \
+  --prefill-sync-policies eval,async,none \
+  --prefill-cache-policy clear \
+  --decode-variants custom \
+  --json
+```
+
+On a local `512` prompt-token / `64` decode-token smoke with the custom decode loop, neither
+`async` nor `none` passed the prefill promotion gate. `async` matched tokens but only improved
+prefill by about 1%, while `none` regressed prefill in that run.
+
+For decode-loop experiments, include `custom_defer_ids` to test whether deferring token-ID CPU
+materialization helps throughput. It preserves final token IDs by truncating after EOS at the end,
+but it is not suitable for streaming because the first usable token is delayed until the decode
+batch completes. On a local `128` prompt-token / `64` decode-token smoke, it matched baseline
+tokens but did not pass the promotion gate (`~0.99x` median decode speedup) and increased TTFT to
+the full decode duration.
+
+`--max-kv-size` is passed to MLX prompt-cache creation. It can bound cache growth for long runs and
+is included in benchmark JSON so speed/memory tradeoffs are explicit.
+
+Benchmark JSON reports generated-token count and a stable token hash by default. Add
+`--include-token-ids` only when debugging exact token sequences; long decode sweeps are otherwise
+much easier to inspect.
+
+For machines with enough unified memory, the CLI can also raise MLX memory residency/cache limits
+before loading the model:
+
+```bash
+gemma4 serve \
+  --mlx-memory-limit-gb 48 \
+  --mlx-cache-limit-gb 40 \
+  --mlx-wired-limit-gb 32 \
+  --prefill-cache-policy retain
+```
+
+`--mlx-wired-limit-gb` maps to `mx.set_wired_limit`, which is macOS-specific and must stay below
+the system wired limit reported by MLX/Metal. If the requested value is too high, startup fails with
+the MLX error instead of silently falling back.
 
 For explicit long-context tuning:
 

@@ -9,7 +9,12 @@ from gemma4_engine.stats import RunStats
 
 class FakeService(EngineService):
     def __init__(self) -> None:
-        self.config = ServerConfig(model_path="fake-model")
+        self.config = ServerConfig(
+            model_path="fake-model",
+            mlx_memory_limit_gb=48,
+            mlx_cache_limit_gb=40,
+            mlx_wired_limit_gb=32,
+        )
         self.engine = SimpleNamespace(
             backend_status=SimpleNamespace(
                 selected="mlx",
@@ -61,6 +66,9 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
             "max_tokens": 4,
             "prompt_mode": "raw",
             "prefill_step_size": "1024",
+            "prefill_cache_policy": "retain",
+            "prefill_sync_policy": "async",
+            "max_kv_size": 4096,
         }
     )
 
@@ -73,6 +81,9 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
     assert service._seen["max_tokens"] == 4
     assert service._seen["prompt_mode"] == "raw"
     assert service._seen["prefill_step_size"] == "1024"
+    assert service._seen["prefill_cache_policy"] == "retain"
+    assert service._seen["prefill_sync_policy"] == "async"
+    assert service._seen["max_kv_size"] == 4096
 
 
 def test_health_reports_loaded_backend() -> None:
@@ -80,3 +91,10 @@ def test_health_reports_loaded_backend() -> None:
 
     assert service.health()["backend_selected"] == "mlx"
     assert service.health()["token_cache_dir"] == ".gemma4-cache/prefix-tokens"
+    assert service.health()["default_prefill_cache_policy"] == "clear"
+    assert service.health()["default_prefill_sync_policy"] == "eval"
+    assert service.health()["mlx_memory"] == {
+        "memory_limit_gb": 48,
+        "cache_limit_gb": 40,
+        "wired_limit_gb": 32,
+    }

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .backends import BackendName
-from .inference import Gemma4Engine, PrefillStepSize
+from .inference import Gemma4Engine, PrefillCachePolicy, PrefillStepSize, PrefillSyncPolicy
 from .stats import RunStats
 
 
@@ -32,11 +32,17 @@ def compare_with_mlx_lm(
     max_tokens: int,
     backend: BackendName,
     prefill_step_size: PrefillStepSize = "auto",
+    prefill_cache_policy: PrefillCachePolicy = "clear",
+    prefill_sync_policy: PrefillSyncPolicy = "eval",
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
+    max_kv_size: int | None = None,
     draft_model_path: str | None = None,
     draft_tokens: int = 4,
+    mlx_memory_limit_gb: float | None = None,
+    mlx_cache_limit_gb: float | None = None,
+    mlx_wired_limit_gb: float | None = None,
 ) -> CompareResult:
     from mlx_lm import stream_generate
 
@@ -45,15 +51,21 @@ def compare_with_mlx_lm(
         backend=backend,
         draft_model_path=draft_model_path,
         draft_tokens=draft_tokens,
+        mlx_memory_limit_gb=mlx_memory_limit_gb,
+        mlx_cache_limit_gb=mlx_cache_limit_gb,
+        mlx_wired_limit_gb=mlx_wired_limit_gb,
     )
     engine_result = engine.infer(
         prompt,
         max_tokens=max_tokens,
         prompt_mode="raw",
         prefill_step_size=prefill_step_size,
+        prefill_cache_policy=prefill_cache_policy,
+        prefill_sync_policy=prefill_sync_policy,
         kv_bits=kv_bits,
         kv_group_size=kv_group_size,
         quantized_kv_start=quantized_kv_start,
+        max_kv_size=max_kv_size,
     )
     baseline_text = ""
     baseline_response = None

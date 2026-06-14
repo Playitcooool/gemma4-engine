@@ -66,9 +66,18 @@ def memory_snapshot() -> dict[str, float | None]:
     }
 
 
-def median_stats(stats: Iterable[RunStats]) -> dict[str, float]:
+def reset_peak_memory() -> None:
+    try:
+        import mlx.core as mx
+    except Exception:
+        return
+    if hasattr(mx, "reset_peak_memory"):
+        mx.reset_peak_memory()
+
+
+def median_stats(stats: Iterable[RunStats]) -> dict[str, float | None]:
     rows = list(stats)
-    return {
+    payload = {
         "prefill_tokens_per_second_median": median(row.prefill_tokens_per_second for row in rows),
         "decode_tokens_per_second_median": median(row.decode_tokens_per_second for row in rows),
         "total_tokens_per_second_median": median(row.total_tokens_per_second for row in rows),
@@ -76,3 +85,7 @@ def median_stats(stats: Iterable[RunStats]) -> dict[str, float]:
             row.time_to_first_token_seconds for row in rows
         ),
     }
+    for field in ("peak_memory_gb", "active_memory_gb", "cache_memory_gb"):
+        values = [getattr(row, field) for row in rows if getattr(row, field) is not None]
+        payload[f"{field}_median"] = median(values) if values else None
+    return payload

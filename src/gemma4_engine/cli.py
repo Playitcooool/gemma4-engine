@@ -3,7 +3,13 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .benchmark import BenchConfig, benchmark_json, run_benchmark
+from .benchmark import (
+    DECODE_BENCHMARK_VARIANTS,
+    PREFILL_SYNC_POLICIES,
+    BenchConfig,
+    benchmark_json,
+    run_benchmark,
+)
 from .compare import compare_with_mlx_lm
 from .constants import DEFAULT_MODEL_PATH
 from .inference import infer
@@ -15,6 +21,67 @@ def _csv_ints(value: str) -> list[int]:
     return [int(part.strip()) for part in value.split(",") if part.strip()]
 
 
+def _csv_prefill_step_sizes(value: str) -> tuple[str, ...]:
+    choices = {"auto", "512", "1024", "2048", "4096", "8192"}
+    values = tuple(part.strip() for part in value.split(",") if part.strip())
+    invalid = [part for part in values if part not in choices]
+    if invalid:
+        raise argparse.ArgumentTypeError(
+            "prefill step sizes must be one or more of: auto, 512, 1024, 2048, 4096, 8192"
+        )
+    if not values:
+        raise argparse.ArgumentTypeError("must include at least one prefill step size")
+    return values
+
+
+def _csv_prefill_sync_policies(value: str) -> tuple[str, ...]:
+    choices = {"eval", "async", "none"}
+    values = tuple(part.strip() for part in value.split(",") if part.strip())
+    invalid = [part for part in values if part not in choices]
+    if invalid:
+        raise argparse.ArgumentTypeError(
+            "prefill sync policies must be one or more of: eval, async, none"
+        )
+    if not values:
+        raise argparse.ArgumentTypeError("must include at least one prefill sync policy")
+    return values
+
+
+def _csv_decode_variants(value: str) -> tuple[str, ...]:
+    choices = {
+        "custom",
+        "custom_no_async",
+        "custom_eval_next",
+        "custom_defer_ids",
+        "mlx_lm_generate_step",
+    }
+    values = tuple(part.strip() for part in value.split(",") if part.strip())
+    invalid = [part for part in values if part not in choices]
+    if invalid:
+        raise argparse.ArgumentTypeError(
+            "decode variants must be one or more of: "
+            "custom, custom_no_async, custom_eval_next, custom_defer_ids, "
+            "mlx_lm_generate_step"
+        )
+    if not values:
+        raise argparse.ArgumentTypeError("must include at least one decode variant")
+    return values
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return parsed
+
+
 def _read_optional_text(value: str | None, file_path: str | None) -> str | None:
     if file_path:
         with open(file_path, "r", encoding="utf-8") as handle:
@@ -24,6 +91,12 @@ def _read_optional_text(value: str | None, file_path: str | None) -> str | None:
 
 def _optional_cache_dir(value: str) -> str | None:
     return value or None
+
+
+def _bench_prefill_cache_policies(value: str) -> tuple[str, ...]:
+    if value == "both":
+        return ("clear", "retain")
+    return (value,)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,9 +123,25 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "512", "1024", "2048", "4096", "8192"],
         default="auto",
     )
+    infer_parser.add_argument(
+        "--prefill-cache-policy",
+        choices=["clear", "retain"],
+        default="clear",
+        help="clear MLX allocator cache after prefill chunks, or retain it for high-memory speed tests",
+    )
+    infer_parser.add_argument(
+        "--prefill-sync-policy",
+        choices=["eval", "async", "none"],
+        default="eval",
+        help="synchronize MLX prompt-cache states after each prefill chunk",
+    )
     infer_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     infer_parser.add_argument("--kv-group-size", type=int, default=64)
     infer_parser.add_argument("--quantized-kv-start", type=int, default=0)
+    infer_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    infer_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
+    infer_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
+    infer_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
     infer_parser.add_argument("--cache-prefix", default=None)
     infer_parser.add_argument("--cache-prefix-file", default=None)
     infer_parser.add_argument("--cache-prefix-mode", choices=["chat", "raw"], default="raw")
@@ -76,8 +165,8 @@ def build_parser() -> argparse.ArgumentParser:
     bench_parser = subparsers.add_parser("bench")
     bench_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
     bench_parser.add_argument("--backend", choices=["mlx", "rust-metal", "auto"], default="auto")
-    bench_parser.add_argument("--prompt-tokens", default="128,512,2048,8192")
-    bench_parser.add_argument("--decode-tokens", default="128,512")
+    bench_parser.add_argument("--prompt-tokens", default="128,512,2048")
+    bench_parser.add_argument("--decode-tokens", default="64,128,256")
     bench_parser.add_argument("--warmups", type=int, default=1)
     bench_parser.add_argument("--runs", type=int, default=3)
     bench_parser.add_argument(
@@ -85,15 +174,48 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "512", "1024", "2048", "4096", "8192"],
         default="auto",
     )
+    bench_parser.add_argument(
+        "--prefill-step-sizes",
+        type=_csv_prefill_step_sizes,
+        default=None,
+        help="comma-separated prefill chunk-size matrix for benchmark runs",
+    )
+    bench_parser.add_argument(
+        "--prefill-cache-policy",
+        choices=["clear", "retain", "both"],
+        default="both",
+        help="prefill allocator-cache policy matrix for benchmark runs",
+    )
+    bench_parser.add_argument(
+        "--prefill-sync-policies",
+        type=_csv_prefill_sync_policies,
+        default=None,
+        help="comma-separated prefill cache-state sync matrix for benchmark runs",
+    )
+    bench_parser.add_argument(
+        "--decode-variants",
+        type=_csv_decode_variants,
+        default=None,
+        help="comma-separated decode variant matrix for benchmark runs",
+    )
     bench_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     bench_parser.add_argument("--kv-group-size", type=int, default=64)
     bench_parser.add_argument("--quantized-kv-start", type=int, default=0)
+    bench_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    bench_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
+    bench_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
+    bench_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
     bench_parser.add_argument(
         "--draft-model",
         default=None,
         help="experimental speculative decoding drafter path",
     )
     bench_parser.add_argument("--draft-tokens", type=int, default=4)
+    bench_parser.add_argument(
+        "--include-token-ids",
+        action="store_true",
+        help="include full generated token IDs in benchmark JSON instead of only count/hash",
+    )
     bench_parser.add_argument("--json", action="store_true")
 
     compare_parser = subparsers.add_parser("compare")
@@ -107,9 +229,25 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "512", "1024", "2048", "4096", "8192"],
         default="auto",
     )
+    compare_parser.add_argument(
+        "--prefill-cache-policy",
+        choices=["clear", "retain"],
+        default="clear",
+        help="clear MLX allocator cache after prefill chunks, or retain it for high-memory speed tests",
+    )
+    compare_parser.add_argument(
+        "--prefill-sync-policy",
+        choices=["eval", "async", "none"],
+        default="eval",
+        help="synchronize MLX prompt-cache states after each prefill chunk",
+    )
     compare_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     compare_parser.add_argument("--kv-group-size", type=int, default=64)
     compare_parser.add_argument("--quantized-kv-start", type=int, default=0)
+    compare_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    compare_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
+    compare_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
+    compare_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
     compare_parser.add_argument(
         "--draft-model",
         default=None,
@@ -133,9 +271,25 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "512", "1024", "2048", "4096", "8192"],
         default="auto",
     )
+    serve_parser.add_argument(
+        "--prefill-cache-policy",
+        choices=["clear", "retain"],
+        default="clear",
+        help="clear MLX allocator cache after prefill chunks, or retain it for high-memory speed tests",
+    )
+    serve_parser.add_argument(
+        "--prefill-sync-policy",
+        choices=["eval", "async", "none"],
+        default="eval",
+        help="synchronize MLX prompt-cache states after each prefill chunk",
+    )
     serve_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     serve_parser.add_argument("--kv-group-size", type=int, default=64)
     serve_parser.add_argument("--quantized-kv-start", type=int, default=0)
+    serve_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    serve_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
+    serve_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
+    serve_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
     serve_parser.add_argument("--cache-prefix", default=None)
     serve_parser.add_argument("--cache-prefix-file", default=None)
     serve_parser.add_argument("--cache-prefix-mode", choices=["chat", "raw"], default="raw")
@@ -170,14 +324,20 @@ def main(argv: list[str] | None = None) -> int:
                 backend=args.backend,
                 prompt_mode=args.prompt_mode,
                 prefill_step_size=args.prefill_step_size,
+                prefill_cache_policy=args.prefill_cache_policy,
+                prefill_sync_policy=args.prefill_sync_policy,
                 kv_bits=args.kv_bits,
                 kv_group_size=args.kv_group_size,
                 quantized_kv_start=args.quantized_kv_start,
+                max_kv_size=args.max_kv_size,
                 cache_prefix=_read_optional_text(args.cache_prefix, args.cache_prefix_file),
                 cache_prefix_mode=args.cache_prefix_mode,
                 token_cache_dir=args.token_cache_dir,
                 draft_model_path=args.draft_model,
                 draft_tokens=args.draft_tokens,
+                mlx_memory_limit_gb=args.mlx_memory_limit_gb,
+                mlx_cache_limit_gb=args.mlx_cache_limit_gb,
+                mlx_wired_limit_gb=args.mlx_wired_limit_gb,
             )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
@@ -242,11 +402,26 @@ def main(argv: list[str] | None = None) -> int:
                     warmups=args.warmups,
                     runs=args.runs,
                     prefill_step_size=args.prefill_step_size,
+                    prefill_step_sizes=args.prefill_step_sizes,
+                    prefill_sync_policies=args.prefill_sync_policies
+                    if args.prefill_sync_policies is not None
+                    else PREFILL_SYNC_POLICIES,
+                    prefill_cache_policies=_bench_prefill_cache_policies(
+                        args.prefill_cache_policy
+                    ),
                     kv_bits=args.kv_bits,
                     kv_group_size=args.kv_group_size,
                     quantized_kv_start=args.quantized_kv_start,
+                    max_kv_size=args.max_kv_size,
                     draft_model_path=args.draft_model,
                     draft_tokens=args.draft_tokens,
+                    decode_variants=args.decode_variants
+                    if args.decode_variants is not None
+                    else DECODE_BENCHMARK_VARIANTS,
+                    mlx_memory_limit_gb=args.mlx_memory_limit_gb,
+                    mlx_cache_limit_gb=args.mlx_cache_limit_gb,
+                    mlx_wired_limit_gb=args.mlx_wired_limit_gb,
+                    include_token_ids=args.include_token_ids,
                 ),
             )
         except RuntimeError as exc:
@@ -263,11 +438,17 @@ def main(argv: list[str] | None = None) -> int:
                 max_tokens=args.max_tokens,
                 backend=args.backend,
                 prefill_step_size=args.prefill_step_size,
+                prefill_cache_policy=args.prefill_cache_policy,
+                prefill_sync_policy=args.prefill_sync_policy,
                 kv_bits=args.kv_bits,
                 kv_group_size=args.kv_group_size,
                 quantized_kv_start=args.quantized_kv_start,
+                max_kv_size=args.max_kv_size,
                 draft_model_path=args.draft_model,
                 draft_tokens=args.draft_tokens,
+                mlx_memory_limit_gb=args.mlx_memory_limit_gb,
+                mlx_cache_limit_gb=args.mlx_cache_limit_gb,
+                mlx_wired_limit_gb=args.mlx_wired_limit_gb,
             )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
@@ -333,9 +514,12 @@ def main(argv: list[str] | None = None) -> int:
                     default_max_tokens=args.max_tokens,
                     default_prompt_mode=args.prompt_mode,
                     default_prefill_step_size=args.prefill_step_size,
+                    default_prefill_cache_policy=args.prefill_cache_policy,
+                    default_prefill_sync_policy=args.prefill_sync_policy,
                     default_kv_bits=args.kv_bits,
                     default_kv_group_size=args.kv_group_size,
                     default_quantized_kv_start=args.quantized_kv_start,
+                    default_max_kv_size=args.max_kv_size,
                     default_cache_prefix=_read_optional_text(
                         args.cache_prefix,
                         args.cache_prefix_file,
@@ -344,6 +528,9 @@ def main(argv: list[str] | None = None) -> int:
                     token_cache_dir=args.token_cache_dir,
                     draft_model_path=args.draft_model,
                     draft_tokens=args.draft_tokens,
+                    mlx_memory_limit_gb=args.mlx_memory_limit_gb,
+                    mlx_cache_limit_gb=args.mlx_cache_limit_gb,
+                    mlx_wired_limit_gb=args.mlx_wired_limit_gb,
                 )
             )
         except RuntimeError as exc:

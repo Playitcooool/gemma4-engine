@@ -9,7 +9,13 @@ from typing import Any
 
 from .backends import BackendName
 from .constants import DEFAULT_MODEL_PATH
-from .inference import Gemma4Engine, PrefillStepSize, PromptMode
+from .inference import (
+    Gemma4Engine,
+    PrefillCachePolicy,
+    PrefillStepSize,
+    PrefillSyncPolicy,
+    PromptMode,
+)
 from .token_cache import DEFAULT_TOKEN_CACHE_DIR
 
 
@@ -22,14 +28,20 @@ class ServerConfig:
     default_max_tokens: int = 128
     default_prompt_mode: PromptMode = "chat"
     default_prefill_step_size: PrefillStepSize = "auto"
+    default_prefill_cache_policy: PrefillCachePolicy = "clear"
+    default_prefill_sync_policy: PrefillSyncPolicy = "eval"
     default_kv_bits: int | None = None
     default_kv_group_size: int = 64
     default_quantized_kv_start: int = 0
+    default_max_kv_size: int | None = None
     default_cache_prefix: str | None = None
     default_cache_prefix_mode: PromptMode = "raw"
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
     draft_model_path: str | None = None
     draft_tokens: int = 4
+    mlx_memory_limit_gb: float | None = None
+    mlx_cache_limit_gb: float | None = None
+    mlx_wired_limit_gb: float | None = None
 
 
 class EngineService:
@@ -41,6 +53,9 @@ class EngineService:
             token_cache_dir=config.token_cache_dir,
             draft_model_path=config.draft_model_path,
             draft_tokens=config.draft_tokens,
+            mlx_memory_limit_gb=config.mlx_memory_limit_gb,
+            mlx_cache_limit_gb=config.mlx_cache_limit_gb,
+            mlx_wired_limit_gb=config.mlx_wired_limit_gb,
         )
         self._lock = threading.Lock()
 
@@ -54,6 +69,14 @@ class EngineService:
             "config_warnings": self.engine.loaded.warnings,
             "draft_model_path": self.config.draft_model_path,
             "token_cache_dir": self.config.token_cache_dir,
+            "default_prefill_cache_policy": self.config.default_prefill_cache_policy,
+            "default_prefill_sync_policy": self.config.default_prefill_sync_policy,
+            "default_max_kv_size": self.config.default_max_kv_size,
+            "mlx_memory": {
+                "memory_limit_gb": self.config.mlx_memory_limit_gb,
+                "cache_limit_gb": self.config.mlx_cache_limit_gb,
+                "wired_limit_gb": self.config.mlx_wired_limit_gb,
+            },
         }
 
     def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -76,6 +99,20 @@ class EngineService:
         if prefill_step_size not in ("auto", "512", "1024", "2048", "4096", "8192"):
             raise ValueError("prefill_step_size must be auto, 512, 1024, 2048, 4096, or 8192")
 
+        prefill_cache_policy = payload.get(
+            "prefill_cache_policy",
+            self.config.default_prefill_cache_policy,
+        )
+        if prefill_cache_policy not in ("clear", "retain"):
+            raise ValueError("prefill_cache_policy must be 'clear' or 'retain'")
+
+        prefill_sync_policy = payload.get(
+            "prefill_sync_policy",
+            self.config.default_prefill_sync_policy,
+        )
+        if prefill_sync_policy not in ("eval", "async", "none"):
+            raise ValueError("prefill_sync_policy must be 'eval', 'async', or 'none'")
+
         kv_bits = payload.get("kv_bits", self.config.default_kv_bits)
         if kv_bits is not None:
             kv_bits = int(kv_bits)
@@ -86,6 +123,12 @@ class EngineService:
         quantized_kv_start = int(
             payload.get("quantized_kv_start", self.config.default_quantized_kv_start)
         )
+        max_kv_size = payload.get("max_kv_size", self.config.default_max_kv_size)
+        if max_kv_size is not None:
+            max_kv_size = int(max_kv_size)
+            if max_kv_size < 1:
+                raise ValueError("max_kv_size must be >= 1")
+
         cache_prefix = payload.get("cache_prefix", self.config.default_cache_prefix)
         if cache_prefix is not None and not isinstance(cache_prefix, str):
             raise ValueError("cache_prefix must be a string when provided")
@@ -103,9 +146,12 @@ class EngineService:
                 max_tokens=max_tokens,
                 prompt_mode=prompt_mode,
                 prefill_step_size=prefill_step_size,
+                prefill_cache_policy=prefill_cache_policy,
+                prefill_sync_policy=prefill_sync_policy,
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
+                max_kv_size=max_kv_size,
                 cache_prefix=cache_prefix,
                 cache_prefix_mode=cache_prefix_mode,
             )

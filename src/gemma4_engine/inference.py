@@ -12,6 +12,15 @@ from .token_cache import DEFAULT_TOKEN_CACHE_DIR, HierarchicalTokenCache, token_
 
 PromptMode = Literal["chat", "raw"]
 PrefillStepSize = Literal["auto", "512", "1024", "2048", "4096", "8192"]
+PrefillCachePolicy = Literal["clear", "retain"]
+PrefillSyncPolicy = Literal["eval", "async", "none"]
+DecodeVariant = Literal[
+    "custom",
+    "custom_no_async",
+    "custom_eval_next",
+    "custom_defer_ids",
+    "mlx_lm_generate_step",
+]
 
 
 @dataclass
@@ -50,9 +59,18 @@ class Gemma4Engine:
     max_token_cache_entries: int = 128
     draft_model_path: str | None = None
     draft_tokens: int = 4
+    mlx_memory_limit_gb: float | None = None
+    mlx_cache_limit_gb: float | None = None
+    mlx_wired_limit_gb: float | None = None
 
     def __post_init__(self) -> None:
+        memory_warnings = _configure_mlx_memory(
+            memory_limit_gb=self.mlx_memory_limit_gb,
+            cache_limit_gb=self.mlx_cache_limit_gb,
+            wired_limit_gb=self.mlx_wired_limit_gb,
+        )
         self.loaded = load_model(self.model_path)
+        self.loaded.warnings.extend(memory_warnings)
         self.argmax_backend, self.backend_status = select_backend(self.backend)
         self._prefix_cache: dict[str, PrefixCacheEntry] = {}
         self._token_cache = HierarchicalTokenCache(
@@ -76,12 +94,16 @@ class Gemma4Engine:
         max_tokens: int,
         prompt_mode: PromptMode = "chat",
         prefill_step_size: PrefillStepSize = "auto",
+        prefill_cache_policy: PrefillCachePolicy = "clear",
+        prefill_sync_policy: PrefillSyncPolicy = "eval",
         kv_bits: int | None = None,
         kv_group_size: int = 64,
         quantized_kv_start: int = 0,
+        max_kv_size: int | None = None,
         eos_token_id: int | None = None,
         cache_prefix: str | None = None,
         cache_prefix_mode: PromptMode = "raw",
+        _decode_variant: DecodeVariant = "custom",
     ) -> GenerationResult:
         prompt_text = _format_prompt(self.loaded.tokenizer, prompt, prompt_mode)
         prompt_ids = _encode(self.loaded.tokenizer, prompt_text)
@@ -114,6 +136,9 @@ class Gemma4Engine:
                 self._get_or_create_prefix_cache(
                     prefix_ids,
                     prefill_step_size=_prefill_step_size(prefill_step_size, len(prefix_ids)),
+                    prefill_cache_policy=prefill_cache_policy,
+                    prefill_sync_policy=prefill_sync_policy,
+                    max_kv_size=max_kv_size,
                 )
             )
             if cached is not None:
@@ -173,7 +198,11 @@ class Gemma4Engine:
                     kv_bits=kv_bits,
                     kv_group_size=kv_group_size,
                     quantized_kv_start=quantized_kv_start,
+                    max_kv_size=max_kv_size,
                     prompt_cache=prompt_cache,
+                    decode_variant=_decode_variant,
+                    prefill_cache_policy=prefill_cache_policy,
+                    prefill_sync_policy=prefill_sync_policy,
                 )
             )
 
@@ -211,11 +240,14 @@ class Gemma4Engine:
         prefix_ids: list[int],
         *,
         prefill_step_size: int,
+        prefill_cache_policy: PrefillCachePolicy = "clear",
+        prefill_sync_policy: PrefillSyncPolicy = "eval",
+        max_kv_size: int | None = None,
     ) -> tuple[PrefixCacheEntry | None, bool, float]:
         if len(prefix_ids) < 2:
             return None, False, 0.0
 
-        key = _prefix_cache_key(prefix_ids)
+        key = _prefix_cache_key(prefix_ids, max_kv_size=max_kv_size)
         existing = self._prefix_cache.get(key)
         if existing is not None:
             return existing, True, 0.0
@@ -223,16 +255,16 @@ class Gemma4Engine:
         import mlx.core as mx
         from mlx_lm.models import cache
 
-        prompt_cache = cache.make_prompt_cache(self.loaded.model)
+        prompt_cache = cache.make_prompt_cache(self.loaded.model, max_kv_size=max_kv_size)
         prompt = mx.array(prefix_ids)
         processed = 0
         build_start = now()
         while len(prompt) - processed > 0:
             count = min(prefill_step_size, len(prompt) - processed)
             self.loaded.model(prompt[processed : processed + count][None], cache=prompt_cache)
-            mx.eval([entry.state for entry in prompt_cache])
+            _sync_prompt_cache(prompt_cache, prefill_sync_policy)
             processed += count
-            mx.clear_cache()
+            _clear_mlx_cache(prefill_cache_policy)
         build_seconds = now() - build_start
 
         entry = PrefixCacheEntry(token_ids=list(prefix_ids), cache=_clone_prompt_cache(prompt_cache))
@@ -242,9 +274,16 @@ class Gemma4Engine:
         return entry, False, build_seconds
 
 
-def _prefix_cache_key(token_ids: list[int]) -> str:
+def _prefix_cache_key(token_ids: list[int], *, max_kv_size: int | None = None) -> str:
     digest = hashlib.blake2b(digest_size=16)
     digest.update(len(token_ids).to_bytes(8, "little"))
+    digest.update(
+        (-1 if max_kv_size is None else int(max_kv_size)).to_bytes(
+            8,
+            "little",
+            signed=True,
+        )
+    )
     for token_id in token_ids:
         digest.update(int(token_id).to_bytes(4, "little", signed=True))
     return digest.hexdigest()
@@ -310,6 +349,71 @@ def _prefill_step_size(value: PrefillStepSize, prompt_tokens: int) -> int:
     return int(value)
 
 
+def _clear_mlx_cache(policy: PrefillCachePolicy) -> None:
+    if policy == "retain":
+        return
+    if policy != "clear":
+        raise ValueError(f"unknown prefill cache policy: {policy}")
+    import mlx.core as mx
+
+    mx.clear_cache()
+
+
+def _sync_prompt_cache(prompt_cache: list[object], policy: PrefillSyncPolicy) -> None:
+    if policy == "none":
+        return
+    import mlx.core as mx
+
+    states = [entry.state for entry in prompt_cache]
+    if policy == "eval":
+        mx.eval(states)
+        return
+    if policy == "async":
+        mx.async_eval(states)
+        return
+    raise ValueError(f"unknown prefill sync policy: {policy}")
+
+
+def _gb_to_bytes(value: float) -> int:
+    return int(value * 1_000_000_000)
+
+
+def _configure_mlx_memory(
+    *,
+    memory_limit_gb: float | None = None,
+    cache_limit_gb: float | None = None,
+    wired_limit_gb: float | None = None,
+) -> list[str]:
+    if memory_limit_gb is None and cache_limit_gb is None and wired_limit_gb is None:
+        return []
+
+    import mlx.core as mx
+
+    configured: list[str] = []
+    try:
+        if memory_limit_gb is not None:
+            previous = mx.set_memory_limit(_gb_to_bytes(memory_limit_gb))
+            configured.append(
+                f"MLX memory limit set to {memory_limit_gb:g} GB "
+                f"(previous {previous / 1_000_000_000:.3g} GB)"
+            )
+        if cache_limit_gb is not None:
+            previous = mx.set_cache_limit(_gb_to_bytes(cache_limit_gb))
+            configured.append(
+                f"MLX cache limit set to {cache_limit_gb:g} GB "
+                f"(previous {previous / 1_000_000_000:.3g} GB)"
+            )
+        if wired_limit_gb is not None:
+            previous = mx.set_wired_limit(_gb_to_bytes(wired_limit_gb))
+            configured.append(
+                f"MLX wired limit set to {wired_limit_gb:g} GB "
+                f"(previous {previous / 1_000_000_000:.3g} GB)"
+            )
+    except Exception as exc:
+        raise RuntimeError(f"failed to configure MLX memory limits: {exc}") from exc
+    return configured
+
+
 def _greedy_generate_tokens(
     *,
     model: object,
@@ -321,7 +425,11 @@ def _greedy_generate_tokens(
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
+    max_kv_size: int | None = None,
     prompt_cache: list[object] | None = None,
+    decode_variant: DecodeVariant = "custom",
+    prefill_cache_policy: PrefillCachePolicy = "clear",
+    prefill_sync_policy: PrefillSyncPolicy = "eval",
 ) -> tuple[list[int], float, float, float]:
     if backend.name == "mlx":
         return _greedy_generate_tokens_mlx(
@@ -333,14 +441,20 @@ def _greedy_generate_tokens(
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
+            max_kv_size=max_kv_size,
             prompt_cache=prompt_cache,
+            decode_variant=decode_variant,
+            prefill_cache_policy=prefill_cache_policy,
+            prefill_sync_policy=prefill_sync_policy,
         )
+    if decode_variant != "custom":
+        raise ValueError(f"decode variant {decode_variant!r} requires the MLX backend")
 
     import mlx.core as mx
     from mlx_lm.models import cache
 
     prompt = mx.array(prompt_ids)
-    prompt_cache = prompt_cache or cache.make_prompt_cache(model)
+    prompt_cache = prompt_cache or cache.make_prompt_cache(model, max_kv_size=max_kv_size)
     processed = 0
 
     prefill_start = now()
@@ -348,9 +462,9 @@ def _greedy_generate_tokens(
         remaining = (len(prompt) - processed) - 1
         count = min(prefill_step_size, remaining)
         model(prompt[processed : processed + count][None], cache=prompt_cache)
-        mx.eval([entry.state for entry in prompt_cache])
+        _sync_prompt_cache(prompt_cache, prefill_sync_policy)
         processed += count
-        mx.clear_cache()
+        _clear_mlx_cache(prefill_cache_policy)
 
     logits = model(prompt[processed:][None], cache=prompt_cache)[:, -1, :]
     mx.eval(logits)
@@ -385,14 +499,39 @@ def _greedy_generate_tokens_mlx(
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
+    max_kv_size: int | None = None,
     prompt_cache: list[object] | None = None,
+    decode_variant: DecodeVariant = "custom",
+    prefill_cache_policy: PrefillCachePolicy = "clear",
+    prefill_sync_policy: PrefillSyncPolicy = "eval",
 ) -> tuple[list[int], float, float, float]:
+    if decode_variant == "mlx_lm_generate_step":
+        return _greedy_generate_tokens_mlx_generate_step(
+            model=model,
+            prompt_ids=prompt_ids,
+            max_tokens=max_tokens,
+            prefill_step_size=prefill_step_size,
+            eos_token_ids=eos_token_ids,
+            kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+            max_kv_size=max_kv_size,
+            prompt_cache=prompt_cache,
+        )
+    if decode_variant not in {
+        "custom",
+        "custom_no_async",
+        "custom_eval_next",
+        "custom_defer_ids",
+    }:
+        raise ValueError(f"unknown decode variant: {decode_variant}")
+
     import mlx.core as mx
     from mlx_lm.generate import generation_stream, wired_limit
     from mlx_lm.models import cache
 
     prompt = mx.array(prompt_ids)
-    prompt_cache = prompt_cache or cache.make_prompt_cache(model)
+    prompt_cache = prompt_cache or cache.make_prompt_cache(model, max_kv_size=max_kv_size)
     processed = 0
 
     def quantize_supported_cache_entries() -> None:
@@ -424,9 +563,9 @@ def _greedy_generate_tokens_mlx(
                 remaining = (len(prompt) - processed) - 1
                 count = min(prefill_step_size, remaining)
                 model_call(prompt[processed : processed + count])
-                mx.eval([entry.state for entry in prompt_cache])
+                _sync_prompt_cache(prompt_cache, prefill_sync_policy)
                 processed += count
-                mx.clear_cache()
+                _clear_mlx_cache(prefill_cache_policy)
 
             token = step(prompt[processed:])
             quantize_supported_cache_entries()
@@ -434,13 +573,35 @@ def _greedy_generate_tokens_mlx(
             mx.eval(token)
 
         prefill_seconds = now() - prefill_start
+        if decode_variant == "custom_defer_ids":
+            generated: list[int] = []
+            decode_start = now()
+            token_arrays = []
+            for index in range(max_tokens):
+                token_arrays.append(token)
+                if index + 1 < max_tokens:
+                    token = step(token)
+                    mx.async_eval(token)
+
+            if token_arrays:
+                tokens = mx.concatenate(token_arrays, axis=0)
+                mx.eval(tokens)
+                token_ids = [int(token_id) for token_id in tokens.tolist()]
+                for token_id in token_ids:
+                    if token_id in eos_token_ids:
+                        break
+                    generated.append(token_id)
+            decode_seconds = now() - decode_start
+            first_token_seconds = prefill_seconds + decode_seconds
+            return generated, prefill_seconds, decode_seconds, first_token_seconds
+
         generated: list[int] = []
         decode_start = now()
         first_token_seconds = 0.0
 
         for index in range(max_tokens):
             next_token = None
-            if index + 1 < max_tokens:
+            if decode_variant != "custom_no_async" and index + 1 < max_tokens:
                 next_token = step(token)
                 mx.async_eval(next_token)
 
@@ -453,11 +614,75 @@ def _greedy_generate_tokens_mlx(
 
             generated.append(token_id)
             if next_token is None:
+                if decode_variant == "custom_no_async" and index + 1 < max_tokens:
+                    token = step(token)
+                    mx.eval(token)
+                    continue
                 break
+            if decode_variant == "custom_eval_next":
+                mx.eval(next_token)
             token = next_token
 
         decode_seconds = now() - decode_start
 
+    return generated, prefill_seconds, decode_seconds, first_token_seconds
+
+
+def _greedy_generate_tokens_mlx_generate_step(
+    *,
+    model: object,
+    prompt_ids: list[int],
+    max_tokens: int,
+    prefill_step_size: int,
+    eos_token_ids: set[int],
+    kv_bits: int | None = None,
+    kv_group_size: int = 64,
+    quantized_kv_start: int = 0,
+    max_kv_size: int | None = None,
+    prompt_cache: list[object] | None = None,
+) -> tuple[list[int], float, float, float]:
+    import mlx.core as mx
+    from mlx_lm.generate import generate_step
+
+    prompt = mx.array(prompt_ids)
+    prefill_start = now()
+    prefill_seconds: float | None = None
+
+    def prompt_progress(processed: int, total: int) -> None:
+        nonlocal prefill_seconds
+        if processed == total and prefill_seconds is None:
+            prefill_seconds = now() - prefill_start
+
+    generated: list[int] = []
+    generator = generate_step(
+        prompt,
+        model,
+        max_tokens=max_tokens,
+        prompt_cache=prompt_cache,
+        max_kv_size=max_kv_size,
+        prefill_step_size=prefill_step_size,
+        kv_bits=kv_bits,
+        kv_group_size=kv_group_size,
+        quantized_kv_start=quantized_kv_start,
+        prompt_progress_callback=prompt_progress,
+    )
+
+    decode_start: float | None = None
+    first_token_seconds = 0.0
+    for token_id, _logprobs in generator:
+        if prefill_seconds is None:
+            prefill_seconds = now() - prefill_start
+        if decode_start is None:
+            decode_start = now()
+            first_token_seconds = prefill_seconds
+        token_id = int(token_id)
+        if token_id in eos_token_ids:
+            break
+        generated.append(token_id)
+
+    if prefill_seconds is None:
+        prefill_seconds = now() - prefill_start
+    decode_seconds = now() - decode_start if decode_start is not None else 0.0
     return generated, prefill_seconds, decode_seconds, first_token_seconds
 
 
@@ -469,15 +694,21 @@ def infer(
     backend: BackendName = "auto",
     prompt_mode: PromptMode = "chat",
     prefill_step_size: PrefillStepSize = "auto",
+    prefill_cache_policy: PrefillCachePolicy = "clear",
+    prefill_sync_policy: PrefillSyncPolicy = "eval",
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
+    max_kv_size: int | None = None,
     eos_token_id: int | None = None,
     cache_prefix: str | None = None,
     cache_prefix_mode: PromptMode = "raw",
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR,
     draft_model_path: str | None = None,
     draft_tokens: int = 4,
+    mlx_memory_limit_gb: float | None = None,
+    mlx_cache_limit_gb: float | None = None,
+    mlx_wired_limit_gb: float | None = None,
 ) -> GenerationResult:
     engine = Gemma4Engine(
         model_path=model_path,
@@ -485,15 +716,21 @@ def infer(
         token_cache_dir=token_cache_dir,
         draft_model_path=draft_model_path,
         draft_tokens=draft_tokens,
+        mlx_memory_limit_gb=mlx_memory_limit_gb,
+        mlx_cache_limit_gb=mlx_cache_limit_gb,
+        mlx_wired_limit_gb=mlx_wired_limit_gb,
     )
     return engine.infer(
         prompt,
         max_tokens=max_tokens,
         prompt_mode=prompt_mode,
         prefill_step_size=prefill_step_size,
+        prefill_cache_policy=prefill_cache_policy,
+        prefill_sync_policy=prefill_sync_policy,
         kv_bits=kv_bits,
         kv_group_size=kv_group_size,
         quantized_kv_start=quantized_kv_start,
+        max_kv_size=max_kv_size,
         eos_token_id=eos_token_id,
         cache_prefix=cache_prefix,
         cache_prefix_mode=cache_prefix_mode,

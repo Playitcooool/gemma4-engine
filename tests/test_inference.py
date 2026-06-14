@@ -25,6 +25,7 @@ def test_auto_prefill_step_size_limits_long_prompt_chunks() -> None:
 def test_prefix_cache_key_depends_on_token_sequence() -> None:
     assert _prefix_cache_key([1, 23]) == _prefix_cache_key([1, 23])
     assert _prefix_cache_key([1, 23]) != _prefix_cache_key([12, 3])
+    assert _prefix_cache_key([1, 23]) != _prefix_cache_key([1, 23], max_kv_size=4096)
 
 
 def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -50,9 +51,20 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
     engine.speculative_runtime = None
     engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
 
-    def get_or_create_prefix_cache(self, prefix_ids: list[int], *, prefill_step_size: int):
+    def get_or_create_prefix_cache(
+        self,
+        prefix_ids: list[int],
+        *,
+        prefill_step_size: int,
+        prefill_cache_policy: str,
+        prefill_sync_policy: str,
+        max_kv_size: int | None,
+    ):
         seen["prefix_ids"] = prefix_ids
         seen["prefix_prefill_step_size"] = prefill_step_size
+        seen["prefix_prefill_cache_policy"] = prefill_cache_policy
+        seen["prefix_prefill_sync_policy"] = prefill_sync_policy
+        seen["prefix_max_kv_size"] = max_kv_size
         return PrefixCacheEntry(token_ids=prefix_ids, cache=[]), True, 0.0
 
     def greedy_generate_tokens(**kwargs):
@@ -71,6 +83,9 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
         "ab12345",
         max_tokens=1,
         prompt_mode="raw",
+        prefill_cache_policy="retain",
+        prefill_sync_policy="async",
+        max_kv_size=4096,
         cache_prefix="ab",
         cache_prefix_mode="raw",
     )
@@ -78,8 +93,66 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
     assert result.text == "!"
     assert seen["prefix_ids"] == [97, 98]
     assert seen["prefix_prefill_step_size"] == 2
+    assert seen["prefix_prefill_cache_policy"] == "retain"
+    assert seen["prefix_prefill_sync_policy"] == "async"
+    assert seen["prefix_max_kv_size"] == 4096
     assert seen["suffix_ids"] == [49, 50, 51, 52, 53]
     assert seen["suffix_prefill_step_size"] == 5
+
+
+def test_internal_decode_variant_is_passed_to_greedy_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTokenizer:
+        eos_token_id = 2
+
+        def encode(self, text: str) -> list[int]:
+            return [ord(char) for char in text]
+
+        def decode(self, token_ids: list[int]) -> str:
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    seen: dict[str, object] = {}
+    engine = object.__new__(Gemma4Engine)
+    engine.model_path = "fake-model"
+    engine.loaded = SimpleNamespace(
+        tokenizer=FakeTokenizer(),
+        model=object(),
+        warnings=[],
+        config={},
+    )
+    engine.argmax_backend = SimpleNamespace(name="mlx")
+    engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
+    engine.draft_model_path = None
+    engine.speculative_runtime = None
+    engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
+
+    def greedy_generate_tokens(**kwargs):
+        seen["decode_variant"] = kwargs["decode_variant"]
+        seen["eos_token_ids"] = kwargs["eos_token_ids"]
+        seen["prefill_cache_policy"] = kwargs["prefill_cache_policy"]
+        seen["prefill_sync_policy"] = kwargs["prefill_sync_policy"]
+        seen["max_kv_size"] = kwargs["max_kv_size"]
+        return [33], 0.1, 0.2, 0.3
+
+    monkeypatch.setattr(inference, "_greedy_generate_tokens", greedy_generate_tokens)
+
+    result = engine.infer(
+        "ab",
+        max_tokens=1,
+        prompt_mode="raw",
+        prefill_cache_policy="retain",
+        prefill_sync_policy="none",
+        max_kv_size=4096,
+        _decode_variant="custom_no_async",
+    )
+
+    assert result.text == "!"
+    assert seen["decode_variant"] == "custom_no_async"
+    assert seen["eos_token_ids"] == {2}
+    assert seen["prefill_cache_policy"] == "retain"
+    assert seen["prefill_sync_policy"] == "none"
+    assert seen["max_kv_size"] == 4096
 
 
 def test_prefix_token_cache_uses_memory_then_disk(
@@ -114,7 +187,7 @@ def test_prefix_token_cache_uses_memory_then_disk(
         engine._token_cache = inference.HierarchicalTokenCache(disk_dir=tmp_path)
         return engine
 
-    def get_or_create_prefix_cache(self, prefix_ids: list[int], *, prefill_step_size: int):
+    def get_or_create_prefix_cache(self, prefix_ids: list[int], **_kwargs):
         return PrefixCacheEntry(token_ids=prefix_ids, cache=[]), False, 0.0
 
     monkeypatch.setattr(Gemma4Engine, "_get_or_create_prefix_cache", get_or_create_prefix_cache)
