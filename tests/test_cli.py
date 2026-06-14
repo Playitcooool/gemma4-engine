@@ -63,6 +63,8 @@ def test_infer_advanced_flags_still_parse() -> None:
             "shared",
             "--cache-prefix-mode",
             "raw",
+            "--token-cache-dir",
+            "/tmp/gemma4-token-cache",
             "--json",
         ]
     )
@@ -71,7 +73,23 @@ def test_infer_advanced_flags_still_parse() -> None:
     assert args.prefill_step_size == "4096"
     assert args.kv_bits == 4
     assert args.cache_prefix == "shared"
+    assert args.token_cache_dir == "/tmp/gemma4-token-cache"
     assert args.json is True
+
+
+def test_token_cache_dir_empty_string_disables_disk_cache() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "infer",
+            "--prompt",
+            "hello",
+            "--token-cache-dir",
+            "",
+        ]
+    )
+
+    assert args.token_cache_dir is None
 
 
 def test_missing_speculative_extra_is_clear_cli_error(

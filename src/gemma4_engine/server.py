@@ -10,6 +10,7 @@ from typing import Any
 from .backends import BackendName
 from .constants import DEFAULT_MODEL_PATH
 from .inference import Gemma4Engine, PrefillStepSize, PromptMode
+from .token_cache import DEFAULT_TOKEN_CACHE_DIR
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class ServerConfig:
     default_quantized_kv_start: int = 0
     default_cache_prefix: str | None = None
     default_cache_prefix_mode: PromptMode = "raw"
+    token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
     draft_model_path: str | None = None
     draft_tokens: int = 4
 
@@ -36,6 +38,7 @@ class EngineService:
         self.engine = Gemma4Engine(
             model_path=config.model_path,
             backend=config.backend,
+            token_cache_dir=config.token_cache_dir,
             draft_model_path=config.draft_model_path,
             draft_tokens=config.draft_tokens,
         )
@@ -50,6 +53,7 @@ class EngineService:
             "backend_reason": self.engine.backend_status.reason,
             "config_warnings": self.engine.loaded.warnings,
             "draft_model_path": self.config.draft_model_path,
+            "token_cache_dir": self.config.token_cache_dir,
         }
 
     def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -114,6 +118,7 @@ class EngineService:
             "config_warnings": result.config_warnings,
             "prefix_cache_hit": result.prefix_cache_hit,
             "prefix_tokens": result.prefix_tokens,
+            "prefix_token_cache_source": result.prefix_token_cache_source,
             "draft_model_path": result.draft_model_path,
             "speculative_acceptance_rate": result.speculative_acceptance_rate,
         }

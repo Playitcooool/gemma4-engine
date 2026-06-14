@@ -85,6 +85,21 @@ merge text across prefix/suffix boundaries, so independently tokenizing a prefix
 always identical to tokenizing the concatenated prompt. On repeated exact-prefix requests, the
 engine reuses the prefetched KV cache and only prefills the suffix.
 
+Prefix caching is hierarchical:
+
+- Tokenized prefixes are cached in process memory first.
+- Tokenized prefixes are also persisted on disk under `.gemma4-cache/prefix-tokens` by default, so
+  short-lived `gemma4 infer` processes can avoid retokenizing repeated prefixes.
+- Prefilled KV cache state stays in process memory because it is made of live MLX cache tensors; this
+  is the fastest and least brittle representation for serving.
+
+To change or disable the disk token cache:
+
+```bash
+gemma4 serve --token-cache-dir /tmp/gemma4-prefix-tokens
+gemma4 infer --token-cache-dir "" --prompt "Say hi."
+```
+
 The default `--prefill-step-size auto` uses 512-token prefill chunks. On the local target model,
 512 beat larger chunk candidates in a bounded prefill-focused benchmark at 2048 and 8192 prompt
 tokens while also using less peak memory. The verified smoke path is:

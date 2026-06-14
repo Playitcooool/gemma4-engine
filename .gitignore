@@ -3,4 +3,5 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.gemma4-cache/
 crates/*/target/

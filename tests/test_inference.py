@@ -48,6 +48,7 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
     engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
     engine.draft_model_path = None
     engine.speculative_runtime = None
+    engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
 
     def get_or_create_prefix_cache(self, prefix_ids: list[int], *, prefill_step_size: int):
         seen["prefix_ids"] = prefix_ids
@@ -79,6 +80,82 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
     assert seen["prefix_prefill_step_size"] == 2
     assert seen["suffix_ids"] == [49, 50, 51, 52, 53]
     assert seen["suffix_prefill_step_size"] == 5
+
+
+def test_prefix_token_cache_uses_memory_then_disk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    class FakeTokenizer:
+        def __init__(self) -> None:
+            self.encode_calls = 0
+
+        def encode(self, text: str) -> list[int]:
+            self.encode_calls += 1
+            return [ord(char) for char in text]
+
+        def decode(self, token_ids: list[int]) -> str:
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    def make_engine(tokenizer: FakeTokenizer) -> Gemma4Engine:
+        engine = object.__new__(Gemma4Engine)
+        engine.model_path = "fake-model"
+        engine.loaded = SimpleNamespace(
+            tokenizer=tokenizer,
+            model=object(),
+            warnings=[],
+            config={},
+        )
+        engine.argmax_backend = SimpleNamespace(name="mlx")
+        engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
+        engine.draft_model_path = None
+        engine.speculative_runtime = None
+        engine._prefix_cache = {}
+        engine._token_cache = inference.HierarchicalTokenCache(disk_dir=tmp_path)
+        return engine
+
+    def get_or_create_prefix_cache(self, prefix_ids: list[int], *, prefill_step_size: int):
+        return PrefixCacheEntry(token_ids=prefix_ids, cache=[]), False, 0.0
+
+    monkeypatch.setattr(Gemma4Engine, "_get_or_create_prefix_cache", get_or_create_prefix_cache)
+    monkeypatch.setattr(
+        inference,
+        "_greedy_generate_tokens",
+        lambda **_kwargs: ([33], 0.1, 0.2, 0.3),
+    )
+
+    first_tokenizer = FakeTokenizer()
+    first_engine = make_engine(first_tokenizer)
+    first = first_engine.infer(
+        "ab123",
+        max_tokens=1,
+        prompt_mode="raw",
+        cache_prefix="ab",
+        cache_prefix_mode="raw",
+    )
+    second = first_engine.infer(
+        "ab456",
+        max_tokens=1,
+        prompt_mode="raw",
+        cache_prefix="ab",
+        cache_prefix_mode="raw",
+    )
+
+    second_tokenizer = FakeTokenizer()
+    second_engine = make_engine(second_tokenizer)
+    third = second_engine.infer(
+        "ab789",
+        max_tokens=1,
+        prompt_mode="raw",
+        cache_prefix="ab",
+        cache_prefix_mode="raw",
+    )
+
+    assert first.prefix_token_cache_source == "miss"
+    assert second.prefix_token_cache_source == "memory"
+    assert third.prefix_token_cache_source == "disk"
+    assert first_tokenizer.encode_calls == 3
+    assert second_tokenizer.encode_calls == 1
 
 
 def test_create_speculative_runtime_reports_missing_extra(

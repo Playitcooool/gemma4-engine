@@ -39,6 +39,7 @@ class FakeService(EngineService):
             config_warnings=[],
             prefix_cache_hit=False,
             prefix_tokens=0,
+            prefix_token_cache_source=None,
             draft_model_path=None,
             speculative_acceptance_rate=None,
         )
@@ -67,6 +68,7 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
     assert response["stats"]["decode_tokens_per_second"] == 8.0
     assert response["prefix_cache_hit"] is False
     assert response["prefix_tokens"] == 0
+    assert response["prefix_token_cache_source"] is None
     assert service._seen["prompt"] == "hello"
     assert service._seen["max_tokens"] == 4
     assert service._seen["prompt_mode"] == "raw"
@@ -77,3 +79,4 @@ def test_health_reports_loaded_backend() -> None:
     service = FakeService()
 
     assert service.health()["backend_selected"] == "mlx"
+    assert service.health()["token_cache_dir"] == ".gemma4-cache/prefix-tokens"

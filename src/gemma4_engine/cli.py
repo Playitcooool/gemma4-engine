@@ -8,6 +8,7 @@ from .compare import compare_with_mlx_lm
 from .constants import DEFAULT_MODEL_PATH
 from .inference import infer
 from .server import ServerConfig, run_server
+from .token_cache import DEFAULT_TOKEN_CACHE_DIR
 
 
 def _csv_ints(value: str) -> list[int]:
@@ -19,6 +20,10 @@ def _read_optional_text(value: str | None, file_path: str | None) -> str | None:
         with open(file_path, "r", encoding="utf-8") as handle:
             return handle.read()
     return value
+
+
+def _optional_cache_dir(value: str) -> str | None:
+    return value or None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--cache-prefix", default=None)
     infer_parser.add_argument("--cache-prefix-file", default=None)
     infer_parser.add_argument("--cache-prefix-mode", choices=["chat", "raw"], default="raw")
+    infer_parser.add_argument(
+        "--token-cache-dir",
+        default=DEFAULT_TOKEN_CACHE_DIR,
+        type=_optional_cache_dir,
+        help="disk cache directory for tokenized prefixes; pass an empty string to disable",
+    )
     infer_parser.add_argument(
         "--draft-model",
         default=None,
@@ -129,6 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--cache-prefix-file", default=None)
     serve_parser.add_argument("--cache-prefix-mode", choices=["chat", "raw"], default="raw")
     serve_parser.add_argument(
+        "--token-cache-dir",
+        default=DEFAULT_TOKEN_CACHE_DIR,
+        type=_optional_cache_dir,
+        help="disk cache directory for tokenized prefixes; pass an empty string to disable",
+    )
+    serve_parser.add_argument(
         "--draft-model",
         default=None,
         help=(
@@ -158,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
                 quantized_kv_start=args.quantized_kv_start,
                 cache_prefix=_read_optional_text(args.cache_prefix, args.cache_prefix_file),
                 cache_prefix_mode=args.cache_prefix_mode,
+                token_cache_dir=args.token_cache_dir,
                 draft_model_path=args.draft_model,
                 draft_tokens=args.draft_tokens,
             )
@@ -177,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
                         "config_warnings": result.config_warnings,
                         "prefix_cache_hit": result.prefix_cache_hit,
                         "prefix_tokens": result.prefix_tokens,
+                        "prefix_token_cache_source": result.prefix_token_cache_source,
                         "draft_model_path": result.draft_model_path,
                         "speculative_acceptance_rate": result.speculative_acceptance_rate,
                     },
@@ -197,7 +216,8 @@ def main(argv: list[str] | None = None) -> int:
             if result.prefix_tokens:
                 print(
                     f"prefix cache: hit={result.prefix_cache_hit}, "
-                    f"tokens={result.prefix_tokens}",
+                    f"tokens={result.prefix_tokens}, "
+                    f"token_cache={result.prefix_token_cache_source}",
                     file=sys.stderr,
                 )
             if result.draft_model_path:
@@ -321,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.cache_prefix_file,
                     ),
                     default_cache_prefix_mode=args.cache_prefix_mode,
+                    token_cache_dir=args.token_cache_dir,
                     draft_model_path=args.draft_model,
                     draft_tokens=args.draft_tokens,
                 )

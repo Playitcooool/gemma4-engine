@@ -8,6 +8,7 @@ from typing import Literal
 from .backends import ArgmaxBackend, BackendName, select_backend
 from .loader import load_model
 from .stats import RunStats, memory_snapshot, now
+from .token_cache import DEFAULT_TOKEN_CACHE_DIR, HierarchicalTokenCache, token_cache_key
 
 PromptMode = Literal["chat", "raw"]
 PrefillStepSize = Literal["auto", "512", "1024", "2048", "4096", "8192"]
@@ -22,6 +23,7 @@ class GenerationResult:
     config_warnings: list[str]
     prefix_cache_hit: bool = False
     prefix_tokens: int = 0
+    prefix_token_cache_source: str | None = None
     draft_model_path: str | None = None
     speculative_acceptance_rate: float | None = None
 
@@ -44,6 +46,8 @@ class Gemma4Engine:
     model_path: str
     backend: BackendName = "auto"
     max_prefix_cache_entries: int = 4
+    token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
+    max_token_cache_entries: int = 128
     draft_model_path: str | None = None
     draft_tokens: int = 4
 
@@ -51,6 +55,10 @@ class Gemma4Engine:
         self.loaded = load_model(self.model_path)
         self.argmax_backend, self.backend_status = select_backend(self.backend)
         self._prefix_cache: dict[str, PrefixCacheEntry] = {}
+        self._token_cache = HierarchicalTokenCache(
+            disk_dir=self.token_cache_dir,
+            max_memory_entries=self.max_token_cache_entries,
+        )
         self.speculative_runtime = (
             _create_speculative_runtime(
                 self.model_path,
@@ -79,13 +87,23 @@ class Gemma4Engine:
         prompt_ids = _encode(self.loaded.tokenizer, prompt_text)
         prefix_cache_hit = False
         prefix_tokens = 0
+        prefix_token_cache_source = None
         prompt_cache = None
         prefill_ids = prompt_ids
         prefix_cache_build_seconds = 0.0
 
         if cache_prefix:
             prefix_text = _format_prompt(self.loaded.tokenizer, cache_prefix, cache_prefix_mode)
-            prefix_ids = _encode(self.loaded.tokenizer, prefix_text)
+            prefix_token_cache = self._token_cache.get_or_encode(
+                key=token_cache_key(
+                    model_path=self.model_path,
+                    prompt_mode=cache_prefix_mode,
+                    text=prefix_text,
+                ),
+                encode=lambda: _encode(self.loaded.tokenizer, prefix_text),
+            )
+            prefix_ids = prefix_token_cache.token_ids
+            prefix_token_cache_source = prefix_token_cache.source
             if prompt_ids[: len(prefix_ids)] == prefix_ids:
                 suffix_ids = prompt_ids[len(prefix_ids) :]
             else:
@@ -177,12 +195,16 @@ class Gemma4Engine:
             config_warnings=config_warnings,
             prefix_cache_hit=prefix_cache_hit,
             prefix_tokens=prefix_tokens,
+            prefix_token_cache_source=prefix_token_cache_source,
             draft_model_path=self.draft_model_path,
             speculative_acceptance_rate=speculative_acceptance_rate,
         )
 
     def clear_prefix_cache(self) -> None:
         self._prefix_cache.clear()
+
+    def clear_token_memory_cache(self) -> None:
+        self._token_cache.clear_memory()
 
     def _get_or_create_prefix_cache(
         self,
@@ -453,12 +475,14 @@ def infer(
     eos_token_id: int | None = None,
     cache_prefix: str | None = None,
     cache_prefix_mode: PromptMode = "raw",
+    token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR,
     draft_model_path: str | None = None,
     draft_tokens: int = 4,
 ) -> GenerationResult:
     engine = Gemma4Engine(
         model_path=model_path,
         backend=backend,
+        token_cache_dir=token_cache_dir,
         draft_model_path=draft_model_path,
         draft_tokens=draft_tokens,
     )
