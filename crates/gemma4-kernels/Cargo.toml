@@ -1,0 +1,14 @@
+[package]
+name = "gemma4-kernels"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "gemma4_kernels"
+crate-type = ["cdylib"]
+
+[dependencies]
+metal = "0.30"
+objc = "0.2"
+pyo3 = { version = "0.22", features = ["extension-module"] }
+numpy = "0.22"
