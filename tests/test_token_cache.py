@@ -1,3 +1,5 @@
+import os
+
 from gemma4_engine.token_cache import HierarchicalTokenCache, token_cache_key
 
 
@@ -41,6 +43,54 @@ def test_hierarchical_token_cache_ignores_corrupt_disk_entry(tmp_path) -> None:
 
     assert result.source == "miss"
     assert result.token_ids == [7]
+
+
+def test_hierarchical_token_cache_prunes_oldest_disk_entries(tmp_path) -> None:
+    cache = HierarchicalTokenCache(disk_dir=tmp_path, max_disk_bytes=60)
+
+    cache.get_or_encode(key="old", encode=lambda: list(range(8)))
+    cache.get_or_encode(key="new", encode=lambda: list(range(8)))
+
+    assert not (tmp_path / "old.g4tokens").exists()
+    assert (tmp_path / "new.g4tokens").exists()
+
+
+def test_hierarchical_token_cache_prunes_single_oversized_entry(tmp_path) -> None:
+    cache = HierarchicalTokenCache(disk_dir=tmp_path, max_disk_bytes=10)
+
+    cache.get_or_encode(key="oversized", encode=lambda: [1])
+
+    assert not (tmp_path / "oversized.g4tokens").exists()
+
+
+def test_hierarchical_token_cache_refreshes_disk_hit_for_lru(tmp_path) -> None:
+    first_cache = HierarchicalTokenCache(disk_dir=tmp_path, max_disk_bytes=100)
+    first_cache.get_or_encode(key="first", encode=lambda: list(range(8)))
+    first_cache.get_or_encode(key="second", encode=lambda: list(range(8)))
+    os.utime(tmp_path / "first.g4tokens", (1, 1))
+    os.utime(tmp_path / "second.g4tokens", (2, 2))
+
+    second_cache = HierarchicalTokenCache(disk_dir=tmp_path, max_disk_bytes=100)
+    result = second_cache.get_or_encode(
+        key="first",
+        encode=lambda: (_ for _ in ()).throw(AssertionError("encoder should not run")),
+    )
+    second_cache.get_or_encode(key="third", encode=lambda: list(range(8)))
+
+    assert result.source == "disk"
+    assert (tmp_path / "first.g4tokens").exists()
+    assert not (tmp_path / "second.g4tokens").exists()
+    assert (tmp_path / "third.g4tokens").exists()
+
+
+def test_hierarchical_token_cache_can_disable_disk_pruning(tmp_path) -> None:
+    cache = HierarchicalTokenCache(disk_dir=tmp_path, max_disk_bytes=None)
+
+    cache.get_or_encode(key="first", encode=lambda: list(range(8)))
+    cache.get_or_encode(key="second", encode=lambda: list(range(8)))
+
+    assert (tmp_path / "first.g4tokens").exists()
+    assert (tmp_path / "second.g4tokens").exists()
 
 
 def test_token_cache_key_includes_model_mode_and_text() -> None:

@@ -40,8 +40,6 @@ class BenchConfig:
     quantized_kv_start: int = 0
     max_kv_size: int | None = None
     prefill_cache_policies: tuple[PrefillCachePolicy, ...] = PREFILL_CACHE_POLICIES
-    draft_model_path: str | None = None
-    draft_tokens: int = 4
     decode_variants: tuple[DecodeVariant, ...] = DECODE_BENCHMARK_VARIANTS
     mlx_memory_limit_gb: float | None = None
     mlx_cache_limit_gb: float | None = None
@@ -67,8 +65,6 @@ def run_benchmark(
     engine = Gemma4Engine(
         model_path=model_path,
         backend=backend,
-        draft_model_path=config.draft_model_path,
-        draft_tokens=config.draft_tokens,
         mlx_memory_limit_gb=config.mlx_memory_limit_gb,
         mlx_cache_limit_gb=config.mlx_cache_limit_gb,
         mlx_wired_limit_gb=config.mlx_wired_limit_gb,
@@ -77,7 +73,6 @@ def run_benchmark(
         for decode_length in config.decode_lengths:
             prompt = synthetic_prompt(prompt_length)
             baseline_token_ids: list[int] | None = None
-            baseline_peak_memory_gb: float | None = None
             for prefill_step_size in prefill_step_sizes:
                 for prefill_sync_policy in prefill_sync_policies:
                     for prefill_cache_policy in prefill_cache_policies:
@@ -123,19 +118,6 @@ def run_benchmark(
                                 row == baseline_token_ids for row in token_runs
                             )
                             median = median_stats(measured)
-                            if (
-                                prefill_step_size == "auto"
-                                and decode_variant == "custom"
-                                and prefill_cache_policy == "clear"
-                                and prefill_sync_policy == "eval"
-                            ):
-                                baseline_peak_memory_gb = _float_or_none(
-                                    median.get("peak_memory_gb_median")
-                                )
-                            peak_memory_regression_gb = _memory_regression(
-                                _float_or_none(median.get("peak_memory_gb_median")),
-                                baseline_peak_memory_gb,
-                            )
 
                             cases.append(
                                 {
@@ -161,7 +143,6 @@ def run_benchmark(
                                     "best_total_tokens_per_second": max(
                                         row.total_tokens_per_second for row in measured
                                     ),
-                                    "peak_memory_regression_gb": peak_memory_regression_gb,
                                 }
                             )
                             if config.include_token_ids:
@@ -181,37 +162,8 @@ def run_benchmark(
             "cache_limit_gb": config.mlx_cache_limit_gb,
             "wired_limit_gb": config.mlx_wired_limit_gb,
         },
-        "promotion_gate": {
-            "baseline_prefill_step_size": "auto",
-            "baseline_prefill_sync_policy": "eval",
-            "baseline_decode_variant": "custom",
-            "baseline_prefill_cache_policy": "clear",
-            "min_decode_tokens_per_second_improvement": 0.05,
-            "max_peak_memory_regression_gb": 0.5,
-            "requires_tokens_match_baseline": True,
-        },
-        "prefill_promotion_gate": {
-            "baseline_prefill_step_size": "auto",
-            "baseline_prefill_sync_policy": "eval",
-            "baseline_decode_variant": "custom",
-            "baseline_prefill_cache_policy": "clear",
-            "min_prefill_tokens_per_second_improvement": 0.05,
-            "max_decode_tokens_per_second_regression": 0.05,
-            "max_peak_memory_regression_gb": 0.5,
-            "requires_tokens_match_baseline": True,
-        },
-        "max_kv_size_feasibility": {
-            "status": "enabled" if config.max_kv_size is not None else "not_enabled",
-            "reason": (
-                "passed to mlx_lm cache.make_prompt_cache/generate_step"
-                if config.max_kv_size is not None
-                else "not requested; default MLX prompt cache size is used"
-            ),
-        },
         "cases": cases,
     }
-    payload["promotion_analysis"] = _promotion_analysis(payload)
-    payload["prefill_promotion_analysis"] = _prefill_promotion_analysis(payload)
     return payload
 
 
@@ -237,12 +189,6 @@ def _float_or_none(value: object) -> float | None:
     return float(value) if value is not None else None
 
 
-def _memory_regression(value: float | None, baseline: float | None) -> float | None:
-    if value is None or baseline is None:
-        return None
-    return value - baseline
-
-
 def _token_hash(token_ids: list[int]) -> str:
     digest = hashlib.blake2b(digest_size=16)
     digest.update(len(token_ids).to_bytes(8, "little"))
@@ -251,293 +197,139 @@ def _token_hash(token_ids: list[int]) -> str:
     return digest.hexdigest()
 
 
-def _promotion_analysis(payload: dict[str, object]) -> dict[str, object]:
-    gate = payload["promotion_gate"]
-    cases = payload["cases"]
-    if not isinstance(gate, dict) or not isinstance(cases, list):
-        return {"status": "invalid", "reason": "benchmark payload is malformed"}
-
-    baseline_step_size = gate["baseline_prefill_step_size"]
-    baseline_sync_policy = gate["baseline_prefill_sync_policy"]
-    baseline_variant = gate["baseline_decode_variant"]
-    baseline_policy = gate["baseline_prefill_cache_policy"]
-    min_improvement = float(gate["min_decode_tokens_per_second_improvement"])
-    max_memory_regression = float(gate["max_peak_memory_regression_gb"])
-    grouped: dict[tuple[int, int], dict[tuple[str, str, str, str], dict[str, object]]] = {}
-    for case in cases:
-        if not isinstance(case, dict):
-            continue
-        key = (int(case["prompt_length_hint"]), int(case["decode_tokens_requested"]))
-        candidate_key = (
-            str(case["prefill_step_size"]),
-            str(case["prefill_sync_policy"]),
-            str(case["prefill_cache_policy"]),
-            str(case["decode_variant"]),
-        )
-        grouped.setdefault(key, {})[candidate_key] = case
-
-    candidate_keys = sorted(
-        {
-            candidate_key
-            for group in grouped.values()
-            for candidate_key in group
-            if candidate_key
-            != (baseline_step_size, baseline_sync_policy, baseline_policy, baseline_variant)
-        }
-    )
-    candidate_results: list[dict[str, object]] = []
-    for candidate_key in candidate_keys:
-        failures: list[str] = []
-        decode_speedups: list[float] = []
-        prefill_speedups: list[float] = []
-        memory_regressions: list[float] = []
-        for group_key, group in grouped.items():
-            baseline = group.get(
-                (baseline_step_size, baseline_sync_policy, baseline_policy, baseline_variant)
-            )
-            candidate = group.get(candidate_key)
-            if baseline is None or candidate is None:
-                failures.append(f"missing case prompt={group_key[0]} decode={group_key[1]}")
-                continue
-            if not candidate.get("tokens_match_baseline"):
-                failures.append(f"token mismatch prompt={group_key[0]} decode={group_key[1]}")
-            baseline_median = baseline["median"]
-            candidate_median = candidate["median"]
-            if not isinstance(baseline_median, dict) or not isinstance(candidate_median, dict):
-                failures.append(f"missing medians prompt={group_key[0]} decode={group_key[1]}")
-                continue
-            baseline_decode = float(baseline_median["decode_tokens_per_second_median"])
-            candidate_decode = float(candidate_median["decode_tokens_per_second_median"])
-            baseline_prefill = float(baseline_median["prefill_tokens_per_second_median"])
-            candidate_prefill = float(candidate_median["prefill_tokens_per_second_median"])
-            decode_speedup = _ratio(candidate_decode, baseline_decode)
-            prefill_speedup = _ratio(candidate_prefill, baseline_prefill)
-            if decode_speedup is None:
-                failures.append(f"zero baseline decode speed prompt={group_key[0]} decode={group_key[1]}")
-            else:
-                decode_speedups.append(decode_speedup)
-                if decode_speedup < 1.0 + min_improvement:
-                    failures.append(
-                        f"decode speedup {decode_speedup:.3f}x below gate "
-                        f"prompt={group_key[0]} decode={group_key[1]}"
-                    )
-            if prefill_speedup is not None:
-                prefill_speedups.append(prefill_speedup)
-            memory_regression = candidate.get("peak_memory_regression_gb")
-            if memory_regression is not None:
-                memory_regression = float(memory_regression)
-                memory_regressions.append(memory_regression)
-                if memory_regression > max_memory_regression:
-                    failures.append(
-                        f"peak memory regression {memory_regression:.3f} GB above gate "
-                        f"prompt={group_key[0]} decode={group_key[1]}"
-                    )
-
-        candidate_results.append(
-            {
-                "prefill_step_size": candidate_key[0],
-                "prefill_sync_policy": candidate_key[1],
-                "prefill_cache_policy": candidate_key[2],
-                "decode_variant": candidate_key[3],
-                "passes": not failures,
-                "failures": failures,
-                "min_decode_speedup": min(decode_speedups) if decode_speedups else None,
-                "median_decode_speedup": _median_or_none(decode_speedups),
-                "min_prefill_speedup": min(prefill_speedups) if prefill_speedups else None,
-                "max_peak_memory_regression_gb": max(memory_regressions)
-                if memory_regressions
-                else None,
-            }
-        )
-
-    passing = [candidate for candidate in candidate_results if candidate["passes"]]
-    if not passing:
-        return {
-            "status": "no_candidate_passed",
-            "baseline": {
-                "prefill_step_size": baseline_step_size,
-                "prefill_sync_policy": baseline_sync_policy,
-                "prefill_cache_policy": baseline_policy,
-                "decode_variant": baseline_variant,
-            },
-            "candidates": candidate_results,
-        }
-    best = max(
-        passing,
-        key=lambda candidate: float(candidate["median_decode_speedup"] or 0.0),
-    )
-    return {
-        "status": "candidate_passed",
-        "recommended_default": {
-            "prefill_step_size": best["prefill_step_size"],
-            "prefill_sync_policy": best["prefill_sync_policy"],
-            "prefill_cache_policy": best["prefill_cache_policy"],
-            "decode_variant": best["decode_variant"],
-        },
-        "baseline": {
-            "prefill_step_size": baseline_step_size,
-            "prefill_sync_policy": baseline_sync_policy,
-            "prefill_cache_policy": baseline_policy,
-            "decode_variant": baseline_variant,
-        },
-        "candidates": candidate_results,
-    }
-
-
-def _prefill_promotion_analysis(payload: dict[str, object]) -> dict[str, object]:
-    gate = payload["prefill_promotion_gate"]
-    cases = payload["cases"]
-    if not isinstance(gate, dict) or not isinstance(cases, list):
-        return {"status": "invalid", "reason": "benchmark payload is malformed"}
-
-    baseline_step_size = gate["baseline_prefill_step_size"]
-    baseline_sync_policy = gate["baseline_prefill_sync_policy"]
-    baseline_variant = gate["baseline_decode_variant"]
-    baseline_policy = gate["baseline_prefill_cache_policy"]
-    min_prefill_improvement = float(gate["min_prefill_tokens_per_second_improvement"])
-    max_decode_regression = float(gate["max_decode_tokens_per_second_regression"])
-    max_memory_regression = float(gate["max_peak_memory_regression_gb"])
-    grouped: dict[tuple[int, int], dict[tuple[str, str, str, str], dict[str, object]]] = {}
-    for case in cases:
-        if not isinstance(case, dict):
-            continue
-        key = (int(case["prompt_length_hint"]), int(case["decode_tokens_requested"]))
-        candidate_key = (
-            str(case["prefill_step_size"]),
-            str(case["prefill_sync_policy"]),
-            str(case["prefill_cache_policy"]),
-            str(case["decode_variant"]),
-        )
-        grouped.setdefault(key, {})[candidate_key] = case
-
-    baseline_key = (baseline_step_size, baseline_sync_policy, baseline_policy, baseline_variant)
-    candidate_keys = sorted(
-        {
-            candidate_key
-            for group in grouped.values()
-            for candidate_key in group
-            if candidate_key != baseline_key
-        }
-    )
-    candidate_results: list[dict[str, object]] = []
-    for candidate_key in candidate_keys:
-        failures: list[str] = []
-        prefill_speedups: list[float] = []
-        decode_speedups: list[float] = []
-        memory_regressions: list[float] = []
-        for group_key, group in grouped.items():
-            baseline = group.get(baseline_key)
-            candidate = group.get(candidate_key)
-            if baseline is None or candidate is None:
-                failures.append(f"missing case prompt={group_key[0]} decode={group_key[1]}")
-                continue
-            if not candidate.get("tokens_match_baseline"):
-                failures.append(f"token mismatch prompt={group_key[0]} decode={group_key[1]}")
-            baseline_median = baseline["median"]
-            candidate_median = candidate["median"]
-            if not isinstance(baseline_median, dict) or not isinstance(candidate_median, dict):
-                failures.append(f"missing medians prompt={group_key[0]} decode={group_key[1]}")
-                continue
-            baseline_prefill = float(baseline_median["prefill_tokens_per_second_median"])
-            candidate_prefill = float(candidate_median["prefill_tokens_per_second_median"])
-            baseline_decode = float(baseline_median["decode_tokens_per_second_median"])
-            candidate_decode = float(candidate_median["decode_tokens_per_second_median"])
-            prefill_speedup = _ratio(candidate_prefill, baseline_prefill)
-            decode_speedup = _ratio(candidate_decode, baseline_decode)
-            if prefill_speedup is None:
-                failures.append(
-                    f"zero baseline prefill speed prompt={group_key[0]} decode={group_key[1]}"
-                )
-            else:
-                prefill_speedups.append(prefill_speedup)
-                if prefill_speedup < 1.0 + min_prefill_improvement:
-                    failures.append(
-                        f"prefill speedup {prefill_speedup:.3f}x below gate "
-                        f"prompt={group_key[0]} decode={group_key[1]}"
-                    )
-            if decode_speedup is not None:
-                decode_speedups.append(decode_speedup)
-                if decode_speedup < 1.0 - max_decode_regression:
-                    failures.append(
-                        f"decode speedup {decode_speedup:.3f}x below regression gate "
-                        f"prompt={group_key[0]} decode={group_key[1]}"
-                    )
-            memory_regression = candidate.get("peak_memory_regression_gb")
-            if memory_regression is not None:
-                memory_regression = float(memory_regression)
-                memory_regressions.append(memory_regression)
-                if memory_regression > max_memory_regression:
-                    failures.append(
-                        f"peak memory regression {memory_regression:.3f} GB above gate "
-                        f"prompt={group_key[0]} decode={group_key[1]}"
-                    )
-
-        candidate_results.append(
-            {
-                "prefill_step_size": candidate_key[0],
-                "prefill_sync_policy": candidate_key[1],
-                "prefill_cache_policy": candidate_key[2],
-                "decode_variant": candidate_key[3],
-                "passes": not failures,
-                "failures": failures,
-                "min_prefill_speedup": min(prefill_speedups) if prefill_speedups else None,
-                "median_prefill_speedup": _median_or_none(prefill_speedups),
-                "min_decode_speedup": min(decode_speedups) if decode_speedups else None,
-                "max_peak_memory_regression_gb": max(memory_regressions)
-                if memory_regressions
-                else None,
-            }
-        )
-
-    passing = [candidate for candidate in candidate_results if candidate["passes"]]
-    if not passing:
-        return {
-            "status": "no_candidate_passed",
-            "baseline": {
-                "prefill_step_size": baseline_step_size,
-                "prefill_sync_policy": baseline_sync_policy,
-                "prefill_cache_policy": baseline_policy,
-                "decode_variant": baseline_variant,
-            },
-            "candidates": candidate_results,
-        }
-    best = max(
-        passing,
-        key=lambda candidate: float(candidate["median_prefill_speedup"] or 0.0),
-    )
-    return {
-        "status": "candidate_passed",
-        "recommended_prefill_default": {
-            "prefill_step_size": best["prefill_step_size"],
-            "prefill_sync_policy": best["prefill_sync_policy"],
-            "prefill_cache_policy": best["prefill_cache_policy"],
-            "decode_variant": best["decode_variant"],
-        },
-        "baseline": {
-            "prefill_step_size": baseline_step_size,
-            "prefill_sync_policy": baseline_sync_policy,
-            "prefill_cache_policy": baseline_policy,
-            "decode_variant": baseline_variant,
-        },
-        "candidates": candidate_results,
-    }
-
-
 def _ratio(numerator: float, denominator: float) -> float | None:
     if denominator <= 0:
         return None
     return numerator / denominator
 
 
-def _median_or_none(values: list[float]) -> float | None:
-    if not values:
-        return None
-    sorted_values = sorted(values)
-    midpoint = len(sorted_values) // 2
-    if len(sorted_values) % 2:
-        return sorted_values[midpoint]
-    return (sorted_values[midpoint - 1] + sorted_values[midpoint]) / 2
-
-
 def benchmark_json(payload: dict[str, object]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def benchmark_summary(payload: dict[str, object]) -> str:
+    cases = payload.get("cases", [])
+    if not isinstance(cases, list) or not cases:
+        return "No benchmark cases recorded."
+
+    baselines = _baseline_cases(payload)
+    rows: list[list[str]] = []
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        median = case.get("median", {})
+        if not isinstance(median, dict):
+            median = {}
+        group_key = (
+            int(case["prompt_length_hint"]),
+            int(case["decode_tokens_requested"]),
+        )
+        baseline_median = baselines.get(group_key, {}).get("median", {})
+        if not isinstance(baseline_median, dict):
+            baseline_median = {}
+        prefill_tps = _float_or_none(median.get("prefill_tokens_per_second_median"))
+        decode_tps = _float_or_none(median.get("decode_tokens_per_second_median"))
+        total_tps = _float_or_none(median.get("total_tokens_per_second_median"))
+        ttft = _float_or_none(median.get("time_to_first_token_seconds_median"))
+        peak_memory = _float_or_none(median.get("peak_memory_gb_median"))
+        baseline_prefill_tps = _float_or_none(
+            baseline_median.get("prefill_tokens_per_second_median")
+        )
+        baseline_decode_tps = _float_or_none(
+            baseline_median.get("decode_tokens_per_second_median")
+        )
+        rows.append(
+            [
+                str(group_key[0]),
+                str(group_key[1]),
+                str(case["prefill_step_size"]),
+                str(case["prefill_sync_policy"]),
+                str(case["prefill_cache_policy"]),
+                str(case["decode_variant"]),
+                "yes" if case.get("tokens_match_baseline") else "no",
+                _format_float(prefill_tps, 1),
+                _format_float(decode_tps, 1),
+                _format_float(total_tps, 1),
+                _format_float(ttft, 3),
+                _format_float(peak_memory, 2),
+                _format_ratio(_ratio(prefill_tps or 0.0, baseline_prefill_tps or 0.0)),
+                _format_ratio(_ratio(decode_tps or 0.0, baseline_decode_tps or 0.0)),
+            ]
+        )
+
+    lines = [
+        f"Benchmark summary for {payload.get('model_path')} "
+        f"(backend={payload.get('backend_requested')})",
+        "",
+        _format_table(
+            [
+                "prompt",
+                "decode",
+                "step",
+                "sync",
+                "cache",
+                "variant",
+                "match",
+                "prefill tok/s",
+                "decode tok/s",
+                "total tok/s",
+                "ttft s",
+                "peak GB",
+                "prefill x",
+                "decode x",
+            ],
+            rows,
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def _baseline_cases(payload: dict[str, object]) -> dict[tuple[int, int], dict[str, object]]:
+    cases = payload.get("cases", [])
+    if not isinstance(cases, list):
+        return {}
+    baselines = {}
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        if (
+            case.get("prefill_step_size") == "auto"
+            and case.get("prefill_sync_policy") == "eval"
+            and case.get("prefill_cache_policy") == "clear"
+            and case.get("decode_variant") == "custom"
+        ):
+            baselines[
+                (
+                    int(case["prompt_length_hint"]),
+                    int(case["decode_tokens_requested"]),
+                )
+            ] = case
+    return baselines
+
+
+def _format_table(headers: list[str], rows: list[list[str]]) -> str:
+    widths = [
+        max(len(header), *(len(row[index]) for row in rows))
+        for index, header in enumerate(headers)
+    ]
+    header = "  ".join(
+        header.ljust(widths[index]) for index, header in enumerate(headers)
+    )
+    separator = "  ".join("-" * width for width in widths)
+    body = [
+        "  ".join(value.ljust(widths[index]) for index, value in enumerate(row))
+        for row in rows
+    ]
+    return "\n".join([header, separator, *body])
+
+
+def _format_float(value: float | None, digits: int) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.{digits}f}"
+
+
+def _format_ratio(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.3f}x"

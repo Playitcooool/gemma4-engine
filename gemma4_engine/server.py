@@ -17,6 +17,7 @@ from .inference import (
     PromptMode,
 )
 from .token_cache import DEFAULT_TOKEN_CACHE_DIR
+from .token_cache import DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES
 
 
 @dataclass(frozen=True)
@@ -37,8 +38,7 @@ class ServerConfig:
     default_cache_prefix: str | None = None
     default_cache_prefix_mode: PromptMode = "raw"
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
-    draft_model_path: str | None = None
-    draft_tokens: int = 4
+    max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES
     mlx_memory_limit_gb: float | None = None
     mlx_cache_limit_gb: float | None = None
     mlx_wired_limit_gb: float | None = None
@@ -51,8 +51,7 @@ class EngineService:
             model_path=config.model_path,
             backend=config.backend,
             token_cache_dir=config.token_cache_dir,
-            draft_model_path=config.draft_model_path,
-            draft_tokens=config.draft_tokens,
+            max_token_cache_disk_bytes=config.max_token_cache_disk_bytes,
             mlx_memory_limit_gb=config.mlx_memory_limit_gb,
             mlx_cache_limit_gb=config.mlx_cache_limit_gb,
             mlx_wired_limit_gb=config.mlx_wired_limit_gb,
@@ -67,8 +66,8 @@ class EngineService:
             "backend_selected": self.engine.backend_status.selected,
             "backend_reason": self.engine.backend_status.reason,
             "config_warnings": self.engine.loaded.warnings,
-            "draft_model_path": self.config.draft_model_path,
             "token_cache_dir": self.config.token_cache_dir,
+            "max_token_cache_disk_bytes": self.config.max_token_cache_disk_bytes,
             "default_prefill_cache_policy": self.config.default_prefill_cache_policy,
             "default_prefill_sync_policy": self.config.default_prefill_sync_policy,
             "default_max_kv_size": self.config.default_max_kv_size,
@@ -165,8 +164,6 @@ class EngineService:
             "prefix_cache_hit": result.prefix_cache_hit,
             "prefix_tokens": result.prefix_tokens,
             "prefix_token_cache_source": result.prefix_token_cache_source,
-            "draft_model_path": result.draft_model_path,
-            "speculative_acceptance_rate": result.speculative_acceptance_rate,
         }
 
 
@@ -225,14 +222,9 @@ def make_handler(service: EngineService) -> type[BaseHTTPRequestHandler]:
 def run_server(config: ServerConfig) -> None:
     service = EngineService(config)
     server = HTTPServer((config.host, config.port), make_handler(service))
-    draft_label = (
-        f" speculative=experimental draft={config.draft_model_path}"
-        if config.draft_model_path
-        else ""
-    )
     print(
         f"gemma4 serve listening on http://{config.host}:{config.port} "
-        f"backend={service.engine.backend_status.selected}{draft_label}",
+        f"backend={service.engine.backend_status.selected}",
         flush=True,
     )
     server.serve_forever()

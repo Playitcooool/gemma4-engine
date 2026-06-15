@@ -9,6 +9,7 @@ from pathlib import Path
 
 CACHE_FORMAT_VERSION = 1
 DEFAULT_TOKEN_CACHE_DIR = ".gemma4-cache/prefix-tokens"
+DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES = 500_000_000
 _HEADER = b"G4TC"
 _ENTRY_HEADER = struct.Struct("<4sII")
 
@@ -29,9 +30,11 @@ class HierarchicalTokenCache:
         *,
         disk_dir: str | os.PathLike[str] | None,
         max_memory_entries: int = 128,
+        max_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES,
     ) -> None:
         self.disk_dir = Path(disk_dir) if disk_dir else None
         self.max_memory_entries = max_memory_entries
+        self.max_disk_bytes = max_disk_bytes
         self._memory: OrderedDict[str, list[int]] = OrderedDict()
 
     def get_or_encode(
@@ -81,6 +84,7 @@ class HierarchicalTokenCache:
             expected_size = _ENTRY_HEADER.size + count * 4
             if len(data) != expected_size:
                 return None
+            os.utime(path, None)
             return list(struct.unpack_from(f"<{count}i", data, _ENTRY_HEADER.size))
         except (FileNotFoundError, OSError, struct.error, ValueError):
             return None
@@ -97,8 +101,36 @@ class HierarchicalTokenCache:
             tmp_path = path.with_suffix(".tmp")
             tmp_path.write_bytes(payload)
             tmp_path.replace(path)
+            self._prune_disk()
         except (OSError, OverflowError, struct.error):
             return
+
+    def _prune_disk(self) -> None:
+        if self.disk_dir is None or self.max_disk_bytes is None:
+            return
+        try:
+            entries = []
+            total_size = 0
+            for path in self.disk_dir.glob("*.g4tokens"):
+                stat = path.stat()
+                total_size += stat.st_size
+                entries.append((stat.st_mtime, path, stat.st_size))
+        except OSError:
+            return
+
+        if total_size <= self.max_disk_bytes:
+            return
+
+        for _mtime, path, size in sorted(entries):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue
+            total_size -= size
+            if total_size <= self.max_disk_bytes:
+                break
 
 
 def token_cache_key(

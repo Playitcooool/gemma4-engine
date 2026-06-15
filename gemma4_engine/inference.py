@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import hashlib
 from dataclasses import dataclass
 from typing import Literal
@@ -8,7 +7,12 @@ from typing import Literal
 from .backends import ArgmaxBackend, BackendName, select_backend
 from .loader import load_model
 from .stats import RunStats, memory_snapshot, now
-from .token_cache import DEFAULT_TOKEN_CACHE_DIR, HierarchicalTokenCache, token_cache_key
+from .token_cache import (
+    DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES,
+    DEFAULT_TOKEN_CACHE_DIR,
+    HierarchicalTokenCache,
+    token_cache_key,
+)
 
 PromptMode = Literal["chat", "raw"]
 PrefillStepSize = Literal["auto", "512", "1024", "2048", "4096", "8192"]
@@ -33,21 +37,12 @@ class GenerationResult:
     prefix_cache_hit: bool = False
     prefix_tokens: int = 0
     prefix_token_cache_source: str | None = None
-    draft_model_path: str | None = None
-    speculative_acceptance_rate: float | None = None
 
 
 @dataclass
 class PrefixCacheEntry:
     token_ids: list[int]
     cache: list[object]
-
-
-SPECULATIVE_INSTALL_MESSAGE = (
-    "Speculative decoding is experimental and requires optional dependencies. "
-    "Install them with `uv sync --extra speculative` or "
-    "`pip install 'gemma4-engine[speculative]'`."
-)
 
 
 @dataclass
@@ -57,8 +52,7 @@ class Gemma4Engine:
     max_prefix_cache_entries: int = 4
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
     max_token_cache_entries: int = 128
-    draft_model_path: str | None = None
-    draft_tokens: int = 4
+    max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES
     mlx_memory_limit_gb: float | None = None
     mlx_cache_limit_gb: float | None = None
     mlx_wired_limit_gb: float | None = None
@@ -76,15 +70,7 @@ class Gemma4Engine:
         self._token_cache = HierarchicalTokenCache(
             disk_dir=self.token_cache_dir,
             max_memory_entries=self.max_token_cache_entries,
-        )
-        self.speculative_runtime = (
-            _create_speculative_runtime(
-                self.model_path,
-                self.draft_model_path,
-                draft_tokens=self.draft_tokens,
-            )
-            if self.draft_model_path
-            else None
+            max_disk_bytes=self.max_token_cache_disk_bytes,
         )
 
     def infer(
@@ -161,50 +147,24 @@ class Gemma4Engine:
                     "shared-KV caches are incompatible with quantized KV entries"
                 )
 
-        speculative_acceptance_rate = None
-        if (
-            self.speculative_runtime is not None
-            and prompt_cache is None
-            and self.argmax_backend.name == "mlx"
-        ):
-            spec = self.speculative_runtime.generate(
-                prompt_ids,
+        generated, prefill_seconds, decode_seconds, first_token_seconds = (
+            _greedy_generate_tokens(
+                model=self.loaded.model,
+                prompt_ids=prefill_ids,
                 max_tokens=max_tokens,
+                backend=self.argmax_backend,
+                prefill_step_size=_prefill_step_size(prefill_step_size, len(prefill_ids)),
                 eos_token_ids=eos_ids,
-                prefill_step_size=_prefill_step_size(prefill_step_size, len(prompt_ids)),
+                kv_bits=kv_bits,
+                kv_group_size=kv_group_size,
+                quantized_kv_start=quantized_kv_start,
+                max_kv_size=max_kv_size,
+                prompt_cache=prompt_cache,
+                decode_variant=_decode_variant,
+                prefill_cache_policy=prefill_cache_policy,
+                prefill_sync_policy=prefill_sync_policy,
             )
-            generated = spec.token_ids
-            prefill_seconds = spec.prefill_seconds
-            decode_seconds = spec.decode_seconds
-            first_token_seconds = spec.time_to_first_token_seconds
-            total_draft = sum(spec.draft_lengths)
-            speculative_acceptance_rate = (
-                sum(spec.accept_lengths) / total_draft if total_draft else None
-            )
-        else:
-            if self.speculative_runtime is not None and prompt_cache is not None:
-                config_warnings.append(
-                    "draft model disabled for this request because prefix-cache reuse "
-                    "is not wired into the MTP speculative runtime yet"
-                )
-            generated, prefill_seconds, decode_seconds, first_token_seconds = (
-                _greedy_generate_tokens(
-                    model=self.loaded.model,
-                    prompt_ids=prefill_ids,
-                    max_tokens=max_tokens,
-                    backend=self.argmax_backend,
-                    prefill_step_size=_prefill_step_size(prefill_step_size, len(prefill_ids)),
-                    eos_token_ids=eos_ids,
-                    kv_bits=kv_bits,
-                    kv_group_size=kv_group_size,
-                    quantized_kv_start=quantized_kv_start,
-                    max_kv_size=max_kv_size,
-                    prompt_cache=prompt_cache,
-                    decode_variant=_decode_variant,
-                    prefill_cache_policy=prefill_cache_policy,
-                    prefill_sync_policy=prefill_sync_policy,
-                )
-            )
+        )
 
         stats = RunStats(
             model_path=self.model_path,
@@ -225,8 +185,6 @@ class Gemma4Engine:
             prefix_cache_hit=prefix_cache_hit,
             prefix_tokens=prefix_tokens,
             prefix_token_cache_source=prefix_token_cache_source,
-            draft_model_path=self.draft_model_path,
-            speculative_acceptance_rate=speculative_acceptance_rate,
         )
 
     def clear_prefix_cache(self) -> None:
@@ -290,32 +248,34 @@ def _prefix_cache_key(token_ids: list[int], *, max_kv_size: int | None = None) -
 
 
 def _clone_prompt_cache(prompt_cache: list[object]) -> list[object]:
-    from mlx_lm.models import cache
-
     cloned = []
     for entry in prompt_cache:
-        cloned.append(type(entry).from_state(copy.deepcopy(entry.state), copy.deepcopy(entry.meta_state)))
+        cloned.append(
+            type(entry).from_state(
+                _clone_cache_state(entry.state),
+                _clone_cache_state(entry.meta_state),
+            )
+        )
     return cloned
 
 
-def _create_speculative_runtime(
-    target_model_path: str,
-    draft_model_path: str,
-    *,
-    draft_tokens: int,
-) -> object:
-    try:
-        from .speculative import SpeculativeRuntime
+def _clone_cache_state(value: object) -> object:
+    if _is_mlx_array(value):
+        return value.__copy__()
+    if isinstance(value, list):
+        return [_clone_cache_state(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_cache_state(item) for item in value)
+    if isinstance(value, dict):
+        return {
+            _clone_cache_state(key): _clone_cache_state(item)
+            for key, item in value.items()
+        }
+    return value
 
-        return SpeculativeRuntime(
-            target_model_path,
-            draft_model_path,
-            draft_tokens=draft_tokens,
-        )
-    except ModuleNotFoundError as exc:
-        if exc.name and (exc.name == "mlx_vlm" or exc.name.startswith("mlx_vlm.")):
-            raise RuntimeError(SPECULATIVE_INSTALL_MESSAGE) from exc
-        raise
+
+def _is_mlx_array(value: object) -> bool:
+    return type(value).__module__.startswith("mlx.") and hasattr(value, "__copy__")
 
 
 def _format_prompt(tokenizer: object, prompt: str, mode: PromptMode) -> str:
@@ -704,8 +664,7 @@ def infer(
     cache_prefix: str | None = None,
     cache_prefix_mode: PromptMode = "raw",
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR,
-    draft_model_path: str | None = None,
-    draft_tokens: int = 4,
+    max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES,
     mlx_memory_limit_gb: float | None = None,
     mlx_cache_limit_gb: float | None = None,
     mlx_wired_limit_gb: float | None = None,
@@ -714,8 +673,7 @@ def infer(
         model_path=model_path,
         backend=backend,
         token_cache_dir=token_cache_dir,
-        draft_model_path=draft_model_path,
-        draft_tokens=draft_tokens,
+        max_token_cache_disk_bytes=max_token_cache_disk_bytes,
         mlx_memory_limit_gb=mlx_memory_limit_gb,
         mlx_cache_limit_gb=mlx_cache_limit_gb,
         mlx_wired_limit_gb=mlx_wired_limit_gb,

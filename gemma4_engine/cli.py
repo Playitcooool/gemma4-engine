@@ -8,13 +8,13 @@ from .benchmark import (
     PREFILL_SYNC_POLICIES,
     BenchConfig,
     benchmark_json,
+    benchmark_summary,
     run_benchmark,
 )
-from .compare import compare_with_mlx_lm
 from .constants import DEFAULT_MODEL_PATH
 from .inference import infer
 from .server import ServerConfig, run_server
-from .token_cache import DEFAULT_TOKEN_CACHE_DIR
+from .token_cache import DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES, DEFAULT_TOKEN_CACHE_DIR
 
 
 def _csv_ints(value: str) -> list[int]:
@@ -82,6 +82,13 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
+
+
 def _read_optional_text(value: str | None, file_path: str | None) -> str | None:
     if file_path:
         with open(file_path, "r", encoding="utf-8") as handle:
@@ -91,6 +98,10 @@ def _read_optional_text(value: str | None, file_path: str | None) -> str | None:
 
 def _optional_cache_dir(value: str) -> str | None:
     return value or None
+
+
+def _mb_to_bytes(value: int) -> int:
+    return value * 1_000_000
 
 
 def _bench_prefill_cache_policies(value: str) -> tuple[str, ...]:
@@ -103,7 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gemma4",
         description=(
-            "Simple MLX Gemma 4 runner. Start with `gemma4 serve` or "
+            "Small MLX Gemma 4 runner. Start with `gemma4 serve` or "
             "`gemma4 infer --prompt \"Say hi.\"`."
         ),
     )
@@ -116,7 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
     infer_parser.add_argument("--prompt", required=True)
     infer_parser.add_argument("--max-tokens", type=int, default=128)
-    infer_parser.add_argument("--backend", choices=["mlx", "rust-metal", "auto"], default="auto")
+    infer_parser.add_argument("--backend", choices=["mlx", "auto"], default="auto")
     infer_parser.add_argument("--prompt-mode", choices=["chat", "raw"], default="chat")
     infer_parser.add_argument(
         "--prefill-step-size",
@@ -152,19 +163,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="disk cache directory for tokenized prefixes; pass an empty string to disable",
     )
     infer_parser.add_argument(
-        "--draft-model",
-        default=None,
-        help=(
-            "experimental speculative decoding drafter path; requires "
-            "`uv sync --extra speculative` or `gemma4-engine[speculative]`"
-        ),
+        "--token-cache-max-disk-mb",
+        type=_nonnegative_int,
+        default=DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES // 1_000_000,
+        help="maximum token cache disk usage in decimal MB",
     )
-    infer_parser.add_argument("--draft-tokens", type=int, default=4)
     infer_parser.add_argument("--json", action="store_true")
 
     bench_parser = subparsers.add_parser("bench")
     bench_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
-    bench_parser.add_argument("--backend", choices=["mlx", "rust-metal", "auto"], default="auto")
+    bench_parser.add_argument("--backend", choices=["mlx", "auto"], default="auto")
     bench_parser.add_argument("--prompt-tokens", default="128,512,2048")
     bench_parser.add_argument("--decode-tokens", default="64,128,256")
     bench_parser.add_argument("--warmups", type=int, default=1)
@@ -206,62 +214,18 @@ def build_parser() -> argparse.ArgumentParser:
     bench_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
     bench_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
     bench_parser.add_argument(
-        "--draft-model",
-        default=None,
-        help="experimental speculative decoding drafter path",
-    )
-    bench_parser.add_argument("--draft-tokens", type=int, default=4)
-    bench_parser.add_argument(
         "--include-token-ids",
         action="store_true",
         help="include full generated token IDs in benchmark JSON instead of only count/hash",
     )
     bench_parser.add_argument("--json", action="store_true")
 
-    compare_parser = subparsers.add_parser("compare")
-    compare_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
-    compare_parser.add_argument("--baseline", choices=["mlx_lm"], default="mlx_lm")
-    compare_parser.add_argument("--prompt", required=True)
-    compare_parser.add_argument("--max-tokens", type=int, default=64)
-    compare_parser.add_argument("--backend", choices=["mlx", "rust-metal", "auto"], default="auto")
-    compare_parser.add_argument(
-        "--prefill-step-size",
-        choices=["auto", "512", "1024", "2048", "4096", "8192"],
-        default="auto",
-    )
-    compare_parser.add_argument(
-        "--prefill-cache-policy",
-        choices=["clear", "retain"],
-        default="clear",
-        help="clear MLX allocator cache after prefill chunks, or retain it for high-memory speed tests",
-    )
-    compare_parser.add_argument(
-        "--prefill-sync-policy",
-        choices=["eval", "async", "none"],
-        default="eval",
-        help="synchronize MLX prompt-cache states after each prefill chunk",
-    )
-    compare_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
-    compare_parser.add_argument("--kv-group-size", type=int, default=64)
-    compare_parser.add_argument("--quantized-kv-start", type=int, default=0)
-    compare_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
-    compare_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
-    compare_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
-    compare_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
-    compare_parser.add_argument(
-        "--draft-model",
-        default=None,
-        help="experimental speculative decoding drafter path",
-    )
-    compare_parser.add_argument("--draft-tokens", type=int, default=4)
-    compare_parser.add_argument("--json", action="store_true")
-
     serve_parser = subparsers.add_parser(
         "serve",
         description="Start the persistent /generate JSON service. Example: gemma4 serve",
     )
     serve_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
-    serve_parser.add_argument("--backend", choices=["mlx", "rust-metal", "auto"], default="auto")
+    serve_parser.add_argument("--backend", choices=["mlx", "auto"], default="auto")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)
     serve_parser.add_argument("--max-tokens", type=int, default=128)
@@ -300,14 +264,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="disk cache directory for tokenized prefixes; pass an empty string to disable",
     )
     serve_parser.add_argument(
-        "--draft-model",
-        default=None,
-        help=(
-            "experimental speculative decoding drafter path; keeps default serving "
-            "unchanged unless explicitly supplied"
-        ),
+        "--token-cache-max-disk-mb",
+        type=_nonnegative_int,
+        default=DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES // 1_000_000,
+        help="maximum token cache disk usage in decimal MB",
     )
-    serve_parser.add_argument("--draft-tokens", type=int, default=4)
     return parser
 
 
@@ -333,8 +294,7 @@ def main(argv: list[str] | None = None) -> int:
                 cache_prefix=_read_optional_text(args.cache_prefix, args.cache_prefix_file),
                 cache_prefix_mode=args.cache_prefix_mode,
                 token_cache_dir=args.token_cache_dir,
-                draft_model_path=args.draft_model,
-                draft_tokens=args.draft_tokens,
+                max_token_cache_disk_bytes=_mb_to_bytes(args.token_cache_max_disk_mb),
                 mlx_memory_limit_gb=args.mlx_memory_limit_gb,
                 mlx_cache_limit_gb=args.mlx_cache_limit_gb,
                 mlx_wired_limit_gb=args.mlx_wired_limit_gb,
@@ -356,8 +316,6 @@ def main(argv: list[str] | None = None) -> int:
                         "prefix_cache_hit": result.prefix_cache_hit,
                         "prefix_tokens": result.prefix_tokens,
                         "prefix_token_cache_source": result.prefix_token_cache_source,
-                        "draft_model_path": result.draft_model_path,
-                        "speculative_acceptance_rate": result.speculative_acceptance_rate,
                     },
                     indent=2,
                     sort_keys=True,
@@ -378,13 +336,6 @@ def main(argv: list[str] | None = None) -> int:
                     f"prefix cache: hit={result.prefix_cache_hit}, "
                     f"tokens={result.prefix_tokens}, "
                     f"token_cache={result.prefix_token_cache_source}",
-                    file=sys.stderr,
-                )
-            if result.draft_model_path:
-                print(
-                    "speculative (experimental): "
-                    f"draft={result.draft_model_path}, "
-                    f"acceptance={result.speculative_acceptance_rate}",
                     file=sys.stderr,
                 )
             for warning in result.config_warnings:
@@ -413,8 +364,6 @@ def main(argv: list[str] | None = None) -> int:
                     kv_group_size=args.kv_group_size,
                     quantized_kv_start=args.quantized_kv_start,
                     max_kv_size=args.max_kv_size,
-                    draft_model_path=args.draft_model,
-                    draft_tokens=args.draft_tokens,
                     decode_variants=args.decode_variants
                     if args.decode_variants is not None
                     else DECODE_BENCHMARK_VARIANTS,
@@ -427,81 +376,8 @@ def main(argv: list[str] | None = None) -> int:
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        print(benchmark_json(payload) if args.json else benchmark_json(payload))
+        print(benchmark_json(payload) if args.json else benchmark_summary(payload))
         return 0
-
-    if args.command == "compare":
-        try:
-            result = compare_with_mlx_lm(
-                prompt=args.prompt,
-                model_path=args.model,
-                max_tokens=args.max_tokens,
-                backend=args.backend,
-                prefill_step_size=args.prefill_step_size,
-                prefill_cache_policy=args.prefill_cache_policy,
-                prefill_sync_policy=args.prefill_sync_policy,
-                kv_bits=args.kv_bits,
-                kv_group_size=args.kv_group_size,
-                quantized_kv_start=args.quantized_kv_start,
-                max_kv_size=args.max_kv_size,
-                draft_model_path=args.draft_model,
-                draft_tokens=args.draft_tokens,
-                mlx_memory_limit_gb=args.mlx_memory_limit_gb,
-                mlx_cache_limit_gb=args.mlx_cache_limit_gb,
-                mlx_wired_limit_gb=args.mlx_wired_limit_gb,
-            )
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
-            return 1
-        if args.json:
-            import json
-
-            print(
-                json.dumps(
-                    {
-                        "baseline": result.baseline,
-                        "matches": result.matches,
-                        "engine": {
-                            "text": result.engine_text,
-                            "token_ids": result.engine_tokens,
-                            "stats": result.engine_stats.to_dict(),
-                        },
-                        "baseline_stats": result.baseline_stats,
-                        "speedup": result.speedup,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-            return 0 if result.matches else 1
-
-        print(f"baseline: {result.baseline}")
-        print(f"matches: {result.matches}")
-        print(
-            "engine: "
-            f"backend={result.engine_stats.backend}, "
-            f"prefill={result.engine_stats.prefill_tokens_per_second:.2f} tok/s, "
-            f"decode={result.engine_stats.decode_tokens_per_second:.2f} tok/s, "
-            f"ttft={result.engine_stats.time_to_first_token_seconds:.3f}s"
-        )
-        print(
-            "baseline: "
-            f"backend={result.baseline_stats['backend']}, "
-            f"prefill={float(result.baseline_stats['prefill_tokens_per_second']):.2f} tok/s, "
-            f"decode={float(result.baseline_stats['decode_tokens_per_second']):.2f} tok/s"
-        )
-        if result.speedup["prefill"] is not None and result.speedup["decode"] is not None:
-            print(
-                "speedup: "
-                f"prefill={result.speedup['prefill']:.2f}x, "
-                f"decode={result.speedup['decode']:.2f}x"
-            )
-        if not result.matches:
-            print("engine:")
-            print(result.engine_text)
-            print("baseline:")
-            print(result.baseline_text)
-        return 0 if result.matches else 1
 
     if args.command == "serve":
         try:
@@ -526,8 +402,7 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     default_cache_prefix_mode=args.cache_prefix_mode,
                     token_cache_dir=args.token_cache_dir,
-                    draft_model_path=args.draft_model,
-                    draft_tokens=args.draft_tokens,
+                    max_token_cache_disk_bytes=_mb_to_bytes(args.token_cache_max_disk_mb),
                     mlx_memory_limit_gb=args.mlx_memory_limit_gb,
                     mlx_cache_limit_gb=args.mlx_cache_limit_gb,
                     mlx_wired_limit_gb=args.mlx_wired_limit_gb,

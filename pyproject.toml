@@ -7,16 +7,11 @@ requires-python = ">=3.11"
 dependencies = [
     "mlx>=0.26.0",
     "mlx-lm>=0.25.0",
-    "numpy>=2.0.0",
 ]
 
 [project.optional-dependencies]
-speculative = [
-    "mlx-vlm>=0.6.3",
-]
 dev = [
     "pytest>=8.0.0",
-    "maturin>=1.7.0",
 ]
 
 [project.scripts]

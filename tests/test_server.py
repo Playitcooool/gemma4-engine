@@ -11,6 +11,7 @@ class FakeService(EngineService):
     def __init__(self) -> None:
         self.config = ServerConfig(
             model_path="fake-model",
+            max_token_cache_disk_bytes=123_000_000,
             mlx_memory_limit_gb=48,
             mlx_cache_limit_gb=40,
             mlx_wired_limit_gb=32,
@@ -45,8 +46,6 @@ class FakeService(EngineService):
             prefix_cache_hit=False,
             prefix_tokens=0,
             prefix_token_cache_source=None,
-            draft_model_path=None,
-            speculative_acceptance_rate=None,
         )
 
 
@@ -91,6 +90,7 @@ def test_health_reports_loaded_backend() -> None:
 
     assert service.health()["backend_selected"] == "mlx"
     assert service.health()["token_cache_dir"] == ".gemma4-cache/prefix-tokens"
+    assert service.health()["max_token_cache_disk_bytes"] == 123_000_000
     assert service.health()["default_prefill_cache_policy"] == "clear"
     assert service.health()["default_prefill_sync_policy"] == "eval"
     assert service.health()["mlx_memory"] == {

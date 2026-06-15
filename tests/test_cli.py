@@ -1,7 +1,5 @@
-from gemma4_engine import cli
 from gemma4_engine.cli import build_parser
 from gemma4_engine.constants import DEFAULT_MODEL_PATH
-from gemma4_engine.inference import SPECULATIVE_INSTALL_MESSAGE
 
 
 def test_default_model_path() -> None:
@@ -41,24 +39,6 @@ def test_bench_prefill_step_sizes_parse() -> None:
     assert args.prefill_sync_policies == ("eval", "async", "none")
     assert args.decode_variants == ("custom", "custom_defer_ids", "mlx_lm_generate_step")
     assert args.include_token_ids is True
-
-
-def test_infer_draft_model_flags() -> None:
-    parser = build_parser()
-    args = parser.parse_args(
-        [
-            "infer",
-            "--prompt",
-            "hello",
-            "--draft-model",
-            "/tmp/draft",
-            "--draft-tokens",
-            "3",
-        ]
-    )
-
-    assert args.draft_model == "/tmp/draft"
-    assert args.draft_tokens == 3
 
 
 def test_serve_simple_defaults() -> None:
@@ -101,6 +81,8 @@ def test_infer_advanced_flags_still_parse() -> None:
             "raw",
             "--token-cache-dir",
             "/tmp/gemma4-token-cache",
+            "--token-cache-max-disk-mb",
+            "123",
             "--json",
         ]
     )
@@ -116,6 +98,7 @@ def test_infer_advanced_flags_still_parse() -> None:
     assert args.mlx_wired_limit_gb == 32
     assert args.cache_prefix == "shared"
     assert args.token_cache_dir == "/tmp/gemma4-token-cache"
+    assert args.token_cache_max_disk_mb == 123
     assert args.json is True
 
 
@@ -134,24 +117,8 @@ def test_token_cache_dir_empty_string_disables_disk_cache() -> None:
     assert args.token_cache_dir is None
 
 
-def test_missing_speculative_extra_is_clear_cli_error(
-    monkeypatch,
-    capsys,
-) -> None:
-    def raise_missing_extra(*args, **kwargs):
-        raise RuntimeError(SPECULATIVE_INSTALL_MESSAGE)
+def test_serve_token_cache_max_disk_mb_parses() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["serve", "--token-cache-max-disk-mb", "250"])
 
-    monkeypatch.setattr(cli, "infer", raise_missing_extra)
-
-    exit_code = cli.main(
-        [
-            "infer",
-            "--prompt",
-            "hello",
-            "--draft-model",
-            "/tmp/draft",
-        ]
-    )
-
-    assert exit_code == 1
-    assert "uv sync --extra speculative" in capsys.readouterr().err
+    assert args.token_cache_max_disk_mb == 250

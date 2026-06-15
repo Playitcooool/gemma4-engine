@@ -1,4 +1,3 @@
-import sys
 import types
 from types import SimpleNamespace
 
@@ -6,10 +5,9 @@ import pytest
 
 import gemma4_engine.inference as inference
 from gemma4_engine.inference import (
-    SPECULATIVE_INSTALL_MESSAGE,
     Gemma4Engine,
     PrefixCacheEntry,
-    _create_speculative_runtime,
+    _clone_prompt_cache,
     _prefix_cache_key,
     _prefill_step_size,
 )
@@ -26,6 +24,36 @@ def test_prefix_cache_key_depends_on_token_sequence() -> None:
     assert _prefix_cache_key([1, 23]) == _prefix_cache_key([1, 23])
     assert _prefix_cache_key([1, 23]) != _prefix_cache_key([12, 3])
     assert _prefix_cache_key([1, 23]) != _prefix_cache_key([1, 23], max_kv_size=4096)
+
+
+def test_clone_prompt_cache_clones_nested_mlx_arrays() -> None:
+    import mlx.core as mx
+
+    class FakeCacheEntry:
+        def __init__(self, state, meta_state) -> None:
+            self.state = state
+            self.meta_state = meta_state
+
+        @classmethod
+        def from_state(cls, state, meta_state):
+            return cls(state, meta_state)
+
+    original_array = mx.array([1, 2, 3])
+    original_meta_array = mx.array([4, 5])
+    entry = FakeCacheEntry(
+        state=[original_array, {"nested": (original_meta_array,)}],
+        meta_state={"offset": 7},
+    )
+
+    cloned = _clone_prompt_cache([entry])
+    original_array[0] = 99
+    original_meta_array[1] = 88
+    mx.eval(original_array, original_meta_array)
+
+    assert cloned[0] is not entry
+    assert cloned[0].state[0].tolist() == [1, 2, 3]
+    assert cloned[0].state[1]["nested"][0].tolist() == [4, 5]
+    assert cloned[0].meta_state == {"offset": 7}
 
 
 def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,8 +75,6 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
     )
     engine.argmax_backend = SimpleNamespace(name="mlx")
     engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
-    engine.draft_model_path = None
-    engine.speculative_runtime = None
     engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
 
     def get_or_create_prefix_cache(
@@ -123,8 +149,6 @@ def test_internal_decode_variant_is_passed_to_greedy_loop(
     )
     engine.argmax_backend = SimpleNamespace(name="mlx")
     engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
-    engine.draft_model_path = None
-    engine.speculative_runtime = None
     engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
 
     def greedy_generate_tokens(**kwargs):
@@ -181,8 +205,6 @@ def test_prefix_token_cache_uses_memory_then_disk(
         )
         engine.argmax_backend = SimpleNamespace(name="mlx")
         engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
-        engine.draft_model_path = None
-        engine.speculative_runtime = None
         engine._prefix_cache = {}
         engine._token_cache = inference.HierarchicalTokenCache(disk_dir=tmp_path)
         return engine
@@ -229,24 +251,3 @@ def test_prefix_token_cache_uses_memory_then_disk(
     assert third.prefix_token_cache_source == "disk"
     assert first_tokenizer.encode_calls == 3
     assert second_tokenizer.encode_calls == 1
-
-
-def test_create_speculative_runtime_reports_missing_extra(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = types.ModuleType("gemma4_engine.speculative")
-
-    class MissingSpeculativeRuntime:
-        def __init__(self, *args, **kwargs) -> None:
-            raise ModuleNotFoundError(
-                "No module named 'mlx_vlm'",
-                name="mlx_vlm",
-            )
-
-    module.SpeculativeRuntime = MissingSpeculativeRuntime
-    monkeypatch.setitem(sys.modules, "gemma4_engine.speculative", module)
-
-    with pytest.raises(RuntimeError, match="Speculative decoding is experimental") as exc_info:
-        _create_speculative_runtime("target", "draft", draft_tokens=4)
-
-    assert str(exc_info.value) == SPECULATIVE_INSTALL_MESSAGE
