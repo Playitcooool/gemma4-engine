@@ -37,6 +37,7 @@ class RunStats:
     session_cache_hit: bool = False
     session_tokens_reused: int = 0
     session_count: int | None = None
+    speculative_acceptance_rate: float | None = None
 
     @property
     def prefill_tokens_per_second(self) -> float:
@@ -122,6 +123,7 @@ def median_stats(stats: Iterable[RunStats]) -> dict[str, float | None]:
         "decode_token_latency_p50_seconds",
         "decode_token_latency_p95_seconds",
         "decode_token_latency_max_seconds",
+        "speculative_acceptance_rate",
     )
     for field in optional_fields:
         values = [getattr(row, field) for row in rows if getattr(row, field) is not None]

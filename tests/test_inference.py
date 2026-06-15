@@ -14,6 +14,9 @@ from gemma4_engine.inference import (
     _clear_mlx_cache,
     _clone_prompt_cache,
     _decode_blockwise_mlx,
+    _decode_speculative_ngram_mlx,
+    _ngram_draft,
+    _build_ngram_follow_map,
     _prefix_cache_key,
     _prefill_step_size,
     _sync_prompt_cache,
@@ -118,6 +121,54 @@ def test_blockwise_decode_stops_at_eos_boundary() -> None:
     assert _blockwise_decode_size("custom_blockwise_32") == 32
     assert generated == [1, 2]
     assert timings.decode_token_latencies
+
+
+def test_ngram_draft_uses_longest_recent_match() -> None:
+    follow = _build_ngram_follow_map([1, 2, 3, 1, 2, 4], ngram_min=2, ngram_max=3)
+
+    assert _ngram_draft(
+        [1, 2],
+        follow,
+        ngram_min=2,
+        ngram_max=3,
+        draft_tokens=2,
+    ) == [4]
+
+
+def test_speculative_ngram_decode_verifies_target_tokens() -> None:
+    class FakeToken:
+        def __init__(self, value: int) -> None:
+            self.value = value
+
+        def item(self) -> int:
+            return self.value
+
+    class FakeMx:
+        @staticmethod
+        def eval(_value) -> None:
+            return None
+
+        @staticmethod
+        def async_eval(_value) -> None:
+            return None
+
+    generated, _prefill, _decode, _ttft, timings = _decode_speculative_ngram_mlx(
+        step=lambda token: FakeToken(token.value + 1),
+        token=FakeToken(1),
+        prompt_ids=[1, 2, 1, 2],
+        max_tokens=3,
+        eos_token_ids={99},
+        ngram_min=2,
+        ngram_max=2,
+        draft_tokens=2,
+        prefill_seconds=0.1,
+        timings=GenerationTimings(decode_token_latencies=[]),
+        mx=FakeMx,
+    )
+
+    assert generated == [1, 2, 3]
+    assert timings.speculative_draft_tokens >= 2
+    assert timings.speculative_accepted_tokens == 2
 
 
 def test_prefix_cache_key_depends_on_token_sequence() -> None:

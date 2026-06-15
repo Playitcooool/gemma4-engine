@@ -10,6 +10,7 @@ from typing import Any
 from .backends import BackendName
 from .constants import DEFAULT_MODEL_PATH
 from .inference import (
+    DecodeVariant,
     Gemma4Engine,
     PrefillCachePolicy,
     PrefillStepSize,
@@ -38,6 +39,10 @@ class ServerConfig:
     default_kv_group_size: int = 64
     default_quantized_kv_start: int = 0
     default_max_kv_size: int | None = None
+    default_decode_variant: DecodeVariant = "custom"
+    default_speculative_ngram_min: int = 3
+    default_speculative_ngram_max: int = 6
+    default_speculative_draft_tokens: int = 4
     default_cache_prefix: str | None = None
     default_cache_prefix_mode: PromptMode = "raw"
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
@@ -81,6 +86,10 @@ class EngineService:
             "default_prefill_cache_clear_every": self.config.default_prefill_cache_clear_every,
             "default_prefill_cache_threshold_gb": self.config.default_prefill_cache_threshold_gb,
             "default_max_kv_size": self.config.default_max_kv_size,
+            "default_decode_variant": self.config.default_decode_variant,
+            "default_speculative_ngram_min": self.config.default_speculative_ngram_min,
+            "default_speculative_ngram_max": self.config.default_speculative_ngram_max,
+            "default_speculative_draft_tokens": self.config.default_speculative_draft_tokens,
             "mlx_memory": {
                 "memory_limit_gb": self.config.mlx_memory_limit_gb,
                 "cache_limit_gb": self.config.mlx_cache_limit_gb,
@@ -164,6 +173,36 @@ class EngineService:
             if max_kv_size < 1:
                 raise ValueError("max_kv_size must be >= 1")
 
+        decode_variant = payload.get("decode_variant", self.config.default_decode_variant)
+        if decode_variant not in (
+            "custom",
+            "custom_no_async",
+            "custom_eval_next",
+            "custom_defer_ids",
+            "custom_blockwise_8",
+            "custom_blockwise_16",
+            "custom_blockwise_32",
+            "custom_speculative_ngram",
+            "mlx_lm_generate_step",
+        ):
+            raise ValueError("decode_variant is invalid")
+
+        speculative_ngram_min = int(
+            payload.get("speculative_ngram_min", self.config.default_speculative_ngram_min)
+        )
+        if speculative_ngram_min < 1:
+            raise ValueError("speculative_ngram_min must be >= 1")
+        speculative_ngram_max = int(
+            payload.get("speculative_ngram_max", self.config.default_speculative_ngram_max)
+        )
+        if speculative_ngram_max < speculative_ngram_min:
+            raise ValueError("speculative_ngram_max must be >= speculative_ngram_min")
+        speculative_draft_tokens = int(
+            payload.get("speculative_draft_tokens", self.config.default_speculative_draft_tokens)
+        )
+        if speculative_draft_tokens < 1:
+            raise ValueError("speculative_draft_tokens must be >= 1")
+
         cache_prefix = payload.get("cache_prefix", self.config.default_cache_prefix)
         if cache_prefix is not None and not isinstance(cache_prefix, str):
             raise ValueError("cache_prefix must be a string when provided")
@@ -201,6 +240,10 @@ class EngineService:
                 session_id=session_id,
                 reset_session=reset_session,
                 append_to_session=append_to_session,
+                speculative_ngram_min=speculative_ngram_min,
+                speculative_ngram_max=speculative_ngram_max,
+                speculative_draft_tokens=speculative_draft_tokens,
+                _decode_variant=decode_variant,
             )
 
         return {
@@ -215,6 +258,7 @@ class EngineService:
             "session_cache_hit": result.stats.session_cache_hit,
             "session_tokens_reused": result.stats.session_tokens_reused,
             "session_count": result.stats.session_count,
+            "speculative_acceptance_rate": result.stats.speculative_acceptance_rate,
         }
 
 

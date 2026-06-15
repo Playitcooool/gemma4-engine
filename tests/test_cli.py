@@ -34,14 +34,19 @@ def test_bench_prefill_step_sizes_parse() -> None:
             "--prefill-sync-policies",
             "eval,async,none",
             "--decode-variants",
-            "custom,custom_blockwise_16,mlx_lm_generate_step",
+            "custom,custom_speculative_ngram,custom_blockwise_16,mlx_lm_generate_step",
             "--include-token-ids",
         ]
     )
 
     assert args.prefill_step_sizes == ("auto", "1024", "2048")
     assert args.prefill_sync_policies == ("eval", "async", "none")
-    assert args.decode_variants == ("custom", "custom_blockwise_16", "mlx_lm_generate_step")
+    assert args.decode_variants == (
+        "custom",
+        "custom_speculative_ngram",
+        "custom_blockwise_16",
+        "mlx_lm_generate_step",
+    )
     assert args.include_token_ids is True
 
 
@@ -133,6 +138,14 @@ def test_infer_advanced_flags_still_parse() -> None:
             "4",
             "--max-kv-size",
             "4096",
+            "--decode-variant",
+            "custom_speculative_ngram",
+            "--speculative-ngram-min",
+            "2",
+            "--speculative-ngram-max",
+            "5",
+            "--speculative-draft-tokens",
+            "7",
             "--mlx-memory-limit-gb",
             "48",
             "--mlx-cache-limit-gb",
@@ -160,6 +173,10 @@ def test_infer_advanced_flags_still_parse() -> None:
     assert args.prefill_cache_threshold_gb == 12
     assert args.kv_bits == 4
     assert args.max_kv_size == 4096
+    assert args.decode_variant == "custom_speculative_ngram"
+    assert args.speculative_ngram_min == 2
+    assert args.speculative_ngram_max == 5
+    assert args.speculative_draft_tokens == 7
     assert args.mlx_memory_limit_gb == 48
     assert args.mlx_cache_limit_gb == 40
     assert args.mlx_wired_limit_gb == 32

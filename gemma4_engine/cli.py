@@ -13,7 +13,7 @@ from .benchmark import (
     run_benchmark,
 )
 from .constants import DEFAULT_MODEL_PATH
-from .inference import Gemma4Engine, infer
+from .inference import DecodeVariant, Gemma4Engine, infer
 from .server import ServerConfig, run_server
 from .token_cache import DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES, DEFAULT_TOKEN_CACHE_DIR
 
@@ -57,6 +57,7 @@ def _csv_decode_variants(value: str) -> tuple[str, ...]:
         "custom_blockwise_8",
         "custom_blockwise_16",
         "custom_blockwise_32",
+        "custom_speculative_ngram",
         "mlx_lm_generate_step",
     }
     values = tuple(part.strip() for part in value.split(",") if part.strip())
@@ -66,11 +67,25 @@ def _csv_decode_variants(value: str) -> tuple[str, ...]:
             "decode variants must be one or more of: "
             "custom, custom_no_async, custom_eval_next, custom_defer_ids, "
             "custom_blockwise_8, custom_blockwise_16, custom_blockwise_32, "
-            "mlx_lm_generate_step"
+            "custom_speculative_ngram, mlx_lm_generate_step"
         )
     if not values:
         raise argparse.ArgumentTypeError("must include at least one decode variant")
     return values
+
+
+def _decode_variant_choices() -> tuple[DecodeVariant, ...]:
+    return (
+        "custom",
+        "custom_no_async",
+        "custom_eval_next",
+        "custom_defer_ids",
+        "custom_blockwise_8",
+        "custom_blockwise_16",
+        "custom_blockwise_32",
+        "custom_speculative_ngram",
+        "mlx_lm_generate_step",
+    )
 
 
 def _positive_int(value: str) -> int:
@@ -181,6 +196,10 @@ def _run_chat(args) -> int:
                 max_kv_size=args.max_kv_size,
                 session_id=args.session_id,
                 append_to_session=True,
+                speculative_ngram_min=args.speculative_ngram_min,
+                speculative_ngram_max=args.speculative_ngram_max,
+                speculative_draft_tokens=args.speculative_draft_tokens,
+                _decode_variant=args.decode_variant,
             )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
@@ -231,6 +250,10 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--kv-group-size", type=int, default=64)
     infer_parser.add_argument("--quantized-kv-start", type=int, default=0)
     infer_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    infer_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default="custom")
+    infer_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
+    infer_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
+    infer_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
     infer_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
     infer_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
     infer_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
@@ -294,6 +317,9 @@ def build_parser() -> argparse.ArgumentParser:
     bench_parser.add_argument("--kv-group-size", type=int, default=64)
     bench_parser.add_argument("--quantized-kv-start", type=int, default=0)
     bench_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    bench_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
+    bench_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
+    bench_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
     bench_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
     bench_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
     bench_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
@@ -340,6 +366,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--kv-group-size", type=int, default=64)
     serve_parser.add_argument("--quantized-kv-start", type=int, default=0)
     serve_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    serve_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default="custom")
+    serve_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
+    serve_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
+    serve_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
     serve_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
     serve_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
     serve_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
@@ -386,6 +416,10 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=8)
     chat_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     chat_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    chat_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default="custom")
+    chat_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
+    chat_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
+    chat_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
     chat_parser.add_argument("--session-id", default="chat")
     chat_parser.add_argument("--max-sessions", type=_positive_int, default=4)
     chat_parser.add_argument("--token-cache-dir", default=DEFAULT_TOKEN_CACHE_DIR, type=_optional_cache_dir)
@@ -421,6 +455,10 @@ def main(argv: list[str] | None = None) -> int:
                 cache_prefix_mode=args.cache_prefix_mode,
                 token_cache_dir=args.token_cache_dir,
                 max_token_cache_disk_bytes=_mb_to_bytes(args.token_cache_max_disk_mb),
+                speculative_ngram_min=args.speculative_ngram_min,
+                speculative_ngram_max=args.speculative_ngram_max,
+                speculative_draft_tokens=args.speculative_draft_tokens,
+                _decode_variant=args.decode_variant,
                 mlx_memory_limit_gb=args.mlx_memory_limit_gb,
                 mlx_cache_limit_gb=args.mlx_cache_limit_gb,
                 mlx_wired_limit_gb=args.mlx_wired_limit_gb,
@@ -493,6 +531,9 @@ def main(argv: list[str] | None = None) -> int:
                     kv_group_size=args.kv_group_size,
                     quantized_kv_start=args.quantized_kv_start,
                     max_kv_size=args.max_kv_size,
+                    speculative_ngram_min=args.speculative_ngram_min,
+                    speculative_ngram_max=args.speculative_ngram_max,
+                    speculative_draft_tokens=args.speculative_draft_tokens,
                     decode_variants=args.decode_variants
                     if args.decode_variants is not None
                     else DECODE_BENCHMARK_VARIANTS,
@@ -531,6 +572,10 @@ def main(argv: list[str] | None = None) -> int:
                     default_kv_group_size=args.kv_group_size,
                     default_quantized_kv_start=args.quantized_kv_start,
                     default_max_kv_size=args.max_kv_size,
+                    default_decode_variant=args.decode_variant,
+                    default_speculative_ngram_min=args.speculative_ngram_min,
+                    default_speculative_ngram_max=args.speculative_ngram_max,
+                    default_speculative_draft_tokens=args.speculative_draft_tokens,
                     default_cache_prefix=_read_optional_text(
                         args.cache_prefix,
                         args.cache_prefix_file,

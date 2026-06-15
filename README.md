@@ -119,7 +119,8 @@ The second request reuses the session KV cache and only prefills the newly appen
 
 The default `--prefill-step-size auto` is adaptive: 1024-token chunks for short prompts, then 2048,
 4096, and 8192 as prompt length grows. The benchmark command reports median prefill tok/s, decode
-tok/s, total tok/s, time to first token, peak memory, and speedups against the baseline row.
+tok/s, total tok/s, time to first token, peak memory, speculative acceptance rate, and speedups
+against the baseline row.
 
 Useful benchmark sweeps:
 
@@ -145,6 +146,15 @@ gemma4 bench \
   --prompt-tokens 512 \
   --decode-tokens 128 \
   --decode-variants custom,custom_blockwise_8,custom_blockwise_16,custom_blockwise_32
+
+gemma4 bench \
+  --backend mlx \
+  --prompt-tokens 512 \
+  --decode-tokens 128 \
+  --decode-variants custom,custom_speculative_ngram \
+  --speculative-ngram-min 3 \
+  --speculative-ngram-max 6 \
+  --speculative-draft-tokens 4
 ```
 
 `--prefill-cache-policy retain` keeps the MLX allocator cache between prefill chunks. It can improve

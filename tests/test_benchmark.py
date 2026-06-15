@@ -22,6 +22,9 @@ class FakeEngine:
             peak_memory_gb=2.0,
             active_memory_gb=1.0,
             cache_memory_gb=0.5,
+            speculative_acceptance_rate=0.5
+            if kwargs["_decode_variant"] == "custom_speculative_ngram"
+            else None,
         )
         return SimpleNamespace(token_ids=token_ids, stats=stats)
 
@@ -37,7 +40,7 @@ def test_benchmark_reports_cases_and_summary(monkeypatch) -> None:
             decode_lengths=[64],
             warmups=0,
             runs=1,
-            decode_variants=("custom_no_async", "custom"),
+            decode_variants=("custom_no_async", "custom_speculative_ngram", "custom"),
             prefill_cache_policies=("clear",),
             prefill_step_sizes=("1024", "auto"),
             max_kv_size=4096,
@@ -46,24 +49,33 @@ def test_benchmark_reports_cases_and_summary(monkeypatch) -> None:
 
     cases = payload["cases"]
     assert payload["prefill_step_sizes"] == ["auto", "1024"]
-    assert payload["decode_variants"] == ["custom", "custom_no_async"]
+    assert payload["decode_variants"] == [
+        "custom",
+        "custom_no_async",
+        "custom_speculative_ngram",
+    ]
     assert [case["prefill_step_size"] for case in cases] == [
         "auto",
         "auto",
+        "auto",
+        "1024",
         "1024",
         "1024",
     ]
     assert [case["decode_variant"] for case in cases] == [
         "custom",
         "custom_no_async",
+        "custom_speculative_ngram",
         "custom",
         "custom_no_async",
+        "custom_speculative_ngram",
     ]
     assert cases[0]["tokens_match_baseline"] is True
     assert cases[0]["generated_token_count"] == 3
     assert cases[0]["generated_token_hash"]
     assert cases[0]["median"]["prefill_tokens_per_second_median"] == 256.0
     assert cases[1]["median"]["decode_tokens_per_second_median"] == 12.0
+    assert cases[2]["median"]["speculative_acceptance_rate_median"] == 0.5
 
     summary = benchmark_summary(payload)
     assert "Benchmark summary for fake (backend=mlx)" in summary
@@ -73,7 +85,9 @@ def test_benchmark_reports_cases_and_summary(monkeypatch) -> None:
     assert "prefill sync s" in summary
     assert "decode sync s" in summary
     assert "decode p95 s" in summary
+    assert "spec accept" in summary
     assert "custom_no_async" in summary
+    assert "custom_speculative_ngram" in summary
     assert "2.000x" in summary
 
 

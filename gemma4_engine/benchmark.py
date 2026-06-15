@@ -32,6 +32,7 @@ DECODE_BENCHMARK_VARIANTS: tuple[DecodeVariant, ...] = (
     "custom_blockwise_8",
     "custom_blockwise_16",
     "custom_blockwise_32",
+    "custom_speculative_ngram",
     "mlx_lm_generate_step",
 )
 
@@ -58,6 +59,9 @@ class BenchConfig:
     mlx_cache_limit_gb: float | None = None
     mlx_wired_limit_gb: float | None = None
     include_token_ids: bool = False
+    speculative_ngram_min: int = 3
+    speculative_ngram_max: int = 6
+    speculative_draft_tokens: int = 4
 
 
 def synthetic_prompt(token_count: int) -> str:
@@ -101,6 +105,9 @@ def run_benchmark(
                                     prefill_sync_every=config.prefill_sync_every,
                                     prefill_cache_clear_every=config.prefill_cache_clear_every,
                                     prefill_cache_threshold_gb=config.prefill_cache_threshold_gb,
+                                    speculative_ngram_min=config.speculative_ngram_min,
+                                    speculative_ngram_max=config.speculative_ngram_max,
+                                    speculative_draft_tokens=config.speculative_draft_tokens,
                                     kv_bits=config.kv_bits,
                                     kv_group_size=config.kv_group_size,
                                     quantized_kv_start=config.quantized_kv_start,
@@ -122,6 +129,9 @@ def run_benchmark(
                                     prefill_sync_every=config.prefill_sync_every,
                                     prefill_cache_clear_every=config.prefill_cache_clear_every,
                                     prefill_cache_threshold_gb=config.prefill_cache_threshold_gb,
+                                    speculative_ngram_min=config.speculative_ngram_min,
+                                    speculative_ngram_max=config.speculative_ngram_max,
+                                    speculative_draft_tokens=config.speculative_draft_tokens,
                                     kv_bits=config.kv_bits,
                                     kv_group_size=config.kv_group_size,
                                     quantized_kv_start=config.quantized_kv_start,
@@ -258,6 +268,7 @@ def benchmark_summary(payload: dict[str, object]) -> str:
         decode_sync = _float_or_none(median.get("decode_sync_seconds_median"))
         decode_item = _float_or_none(median.get("decode_token_item_seconds_median"))
         decode_p95 = _float_or_none(median.get("decode_token_latency_p95_seconds_median"))
+        speculative_acceptance = _float_or_none(median.get("speculative_acceptance_rate_median"))
         baseline_prefill_tps = _float_or_none(
             baseline_median.get("prefill_tokens_per_second_median")
         )
@@ -285,6 +296,7 @@ def benchmark_summary(payload: dict[str, object]) -> str:
                 _format_float(decode_sync, 3),
                 _format_float(decode_item, 3),
                 _format_float(decode_p95, 3),
+                _format_float(speculative_acceptance, 3),
                 _format_ratio(_ratio(prefill_tps or 0.0, baseline_prefill_tps or 0.0)),
                 _format_ratio(_ratio(decode_tps or 0.0, baseline_decode_tps or 0.0)),
             ]
@@ -315,6 +327,7 @@ def benchmark_summary(payload: dict[str, object]) -> str:
                 "decode sync s",
                 "decode item s",
                 "decode p95 s",
+                "spec accept",
                 "prefill x",
                 "decode x",
             ],

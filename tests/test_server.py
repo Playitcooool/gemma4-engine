@@ -44,6 +44,7 @@ class FakeService(EngineService):
                 session_cache_hit=bool(kwargs.get("session_id")),
                 session_tokens_reused=3 if kwargs.get("session_id") else 0,
                 session_count=1 if kwargs.get("session_id") else 0,
+                speculative_acceptance_rate=0.5,
             ),
             backend_reason="test",
             config_warnings=[],
@@ -78,6 +79,10 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
             "reset_session": False,
             "append_to_session": True,
             "max_kv_size": 4096,
+            "decode_variant": "custom_speculative_ngram",
+            "speculative_ngram_min": 2,
+            "speculative_ngram_max": 5,
+            "speculative_draft_tokens": 7,
         }
     )
 
@@ -89,6 +94,7 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
     assert response["session_cache_hit"] is True
     assert response["session_tokens_reused"] == 3
     assert response["session_count"] == 1
+    assert response["speculative_acceptance_rate"] == 0.5
     assert service._seen["prompt"] == "hello"
     assert service._seen["max_tokens"] == 4
     assert service._seen["prompt_mode"] == "raw"
@@ -102,6 +108,10 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
     assert service._seen["reset_session"] is False
     assert service._seen["append_to_session"] is True
     assert service._seen["max_kv_size"] == 4096
+    assert service._seen["_decode_variant"] == "custom_speculative_ngram"
+    assert service._seen["speculative_ngram_min"] == 2
+    assert service._seen["speculative_ngram_max"] == 5
+    assert service._seen["speculative_draft_tokens"] == 7
 
 
 def test_health_reports_loaded_backend() -> None:
@@ -117,6 +127,10 @@ def test_health_reports_loaded_backend() -> None:
     assert service.health()["default_prefill_sync_every"] == 4
     assert service.health()["default_prefill_cache_clear_every"] == 8
     assert service.health()["default_prefill_cache_threshold_gb"] is None
+    assert service.health()["default_decode_variant"] == "custom"
+    assert service.health()["default_speculative_ngram_min"] == 3
+    assert service.health()["default_speculative_ngram_max"] == 6
+    assert service.health()["default_speculative_draft_tokens"] == 4
     assert service.health()["mlx_memory"] == {
         "memory_limit_gb": 48,
         "cache_limit_gb": 40,

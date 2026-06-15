@@ -27,6 +27,7 @@ DecodeVariant = Literal[
     "custom_blockwise_8",
     "custom_blockwise_16",
     "custom_blockwise_32",
+    "custom_speculative_ngram",
     "mlx_lm_generate_step",
 ]
 
@@ -67,6 +68,8 @@ class GenerationTimings:
     decode_sync_seconds: float = 0.0
     decode_token_item_seconds: float = 0.0
     decode_token_latencies: list[float] | None = None
+    speculative_draft_tokens: int = 0
+    speculative_accepted_tokens: int = 0
 
 
 @dataclass
@@ -129,6 +132,9 @@ class Gemma4Engine:
         session_id: str | None = None,
         reset_session: bool = False,
         append_to_session: bool = False,
+        speculative_ngram_min: int = 3,
+        speculative_ngram_max: int = 6,
+        speculative_draft_tokens: int = 4,
         _decode_variant: DecodeVariant = "custom",
     ) -> GenerationResult:
         encode_start = now()
@@ -260,6 +266,9 @@ class Gemma4Engine:
                 prefill_sync_every=prefill_sync_every,
                 prefill_cache_clear_every=prefill_cache_clear_every,
                 prefill_cache_threshold_gb=prefill_cache_threshold_gb,
+                speculative_ngram_min=speculative_ngram_min,
+                speculative_ngram_max=speculative_ngram_max,
+                speculative_draft_tokens=speculative_draft_tokens,
                 config_warnings=config_warnings,
             )
         )
@@ -305,6 +314,12 @@ class Gemma4Engine:
             session_cache_hit=session_cache_hit,
             session_tokens_reused=session_tokens_reused,
             session_count=len(self._sessions),
+            speculative_acceptance_rate=(
+                generation_timings.speculative_accepted_tokens
+                / generation_timings.speculative_draft_tokens
+                if generation_timings.speculative_draft_tokens
+                else None
+            ),
             **memory_snapshot(),
         )
         if session_id and append_to_session and prompt_cache is not None:
@@ -403,6 +418,9 @@ class Gemma4Engine:
         prefill_sync_every: int,
         prefill_cache_clear_every: int,
         prefill_cache_threshold_gb: float | None,
+        speculative_ngram_min: int,
+        speculative_ngram_max: int,
+        speculative_draft_tokens: int,
         config_warnings: list[str],
     ) -> tuple[list[int], float, float, float, GenerationTimings]:
         prefill_step_size = initial_prefill_step_size
@@ -428,6 +446,9 @@ class Gemma4Engine:
                     prefill_sync_every=prefill_sync_every,
                     prefill_cache_clear_every=prefill_cache_clear_every,
                     prefill_cache_threshold_gb=prefill_cache_threshold_gb,
+                    speculative_ngram_min=speculative_ngram_min,
+                    speculative_ngram_max=speculative_ngram_max,
+                    speculative_draft_tokens=speculative_draft_tokens,
                 )
             except RuntimeError as exc:
                 next_step_size = _smaller_prefill_step_size(prefill_step_size)
@@ -768,6 +789,9 @@ def _greedy_generate_tokens(
     prefill_sync_every: int = 4,
     prefill_cache_clear_every: int = 8,
     prefill_cache_threshold_gb: float | None = None,
+    speculative_ngram_min: int = 3,
+    speculative_ngram_max: int = 6,
+    speculative_draft_tokens: int = 4,
 ) -> tuple[list[int], float, float, float, GenerationTimings]:
     if backend.name == "mlx":
         return _greedy_generate_tokens_mlx(
@@ -787,6 +811,9 @@ def _greedy_generate_tokens(
             prefill_sync_every=prefill_sync_every,
             prefill_cache_clear_every=prefill_cache_clear_every,
             prefill_cache_threshold_gb=prefill_cache_threshold_gb,
+            speculative_ngram_min=speculative_ngram_min,
+            speculative_ngram_max=speculative_ngram_max,
+            speculative_draft_tokens=speculative_draft_tokens,
         )
     if decode_variant != "custom":
         raise ValueError(f"decode variant {decode_variant!r} requires the MLX backend")
@@ -881,6 +908,9 @@ def _greedy_generate_tokens_mlx(
     prefill_sync_every: int = 4,
     prefill_cache_clear_every: int = 8,
     prefill_cache_threshold_gb: float | None = None,
+    speculative_ngram_min: int = 3,
+    speculative_ngram_max: int = 6,
+    speculative_draft_tokens: int = 4,
 ) -> tuple[list[int], float, float, float, GenerationTimings]:
     if decode_variant == "mlx_lm_generate_step":
         return _greedy_generate_tokens_mlx_generate_step(
@@ -903,6 +933,7 @@ def _greedy_generate_tokens_mlx(
         "custom_blockwise_8",
         "custom_blockwise_16",
         "custom_blockwise_32",
+        "custom_speculative_ngram",
     }:
         raise ValueError(f"unknown decode variant: {decode_variant}")
 
@@ -987,6 +1018,21 @@ def _greedy_generate_tokens_mlx(
                 max_tokens=max_tokens,
                 block_size=block_size,
                 eos_token_ids=eos_token_ids,
+                prefill_seconds=prefill_seconds,
+                timings=timings,
+                mx=mx,
+            )
+
+        if decode_variant == "custom_speculative_ngram":
+            return _decode_speculative_ngram_mlx(
+                step=step,
+                token=token,
+                prompt_ids=prompt_ids,
+                max_tokens=max_tokens,
+                eos_token_ids=eos_token_ids,
+                ngram_min=speculative_ngram_min,
+                ngram_max=speculative_ngram_max,
+                draft_tokens=speculative_draft_tokens,
                 prefill_seconds=prefill_seconds,
                 timings=timings,
                 mx=mx,
@@ -1150,6 +1196,145 @@ def _decode_blockwise_mlx(
     return generated, prefill_seconds, decode_seconds, first_token_seconds, timings
 
 
+def _build_ngram_follow_map(
+    token_ids: list[int],
+    *,
+    ngram_min: int,
+    ngram_max: int,
+) -> dict[tuple[int, ...], list[int]]:
+    follow: dict[tuple[int, ...], list[int]] = {}
+    if ngram_min < 1 or ngram_max < ngram_min:
+        return follow
+    for size in range(ngram_min, ngram_max + 1):
+        if len(token_ids) <= size:
+            continue
+        for index in range(0, len(token_ids) - size):
+            key = tuple(token_ids[index : index + size])
+            follow.setdefault(key, []).append(token_ids[index + size])
+    return follow
+
+
+def _ngram_draft(
+    context: list[int],
+    follow: dict[tuple[int, ...], list[int]],
+    *,
+    ngram_min: int,
+    ngram_max: int,
+    draft_tokens: int,
+) -> list[int]:
+    if draft_tokens < 1:
+        return []
+    draft: list[int] = []
+    working = list(context)
+    for _ in range(draft_tokens):
+        proposed = None
+        max_size = min(ngram_max, len(working))
+        for size in range(max_size, ngram_min - 1, -1):
+            candidates = follow.get(tuple(working[-size:]))
+            if candidates:
+                proposed = candidates[-1]
+                break
+        if proposed is None:
+            break
+        draft.append(proposed)
+        working.append(proposed)
+    return draft
+
+
+def _remember_ngram_token(
+    context: list[int],
+    token_id: int,
+    follow: dict[tuple[int, ...], list[int]],
+    *,
+    ngram_min: int,
+    ngram_max: int,
+) -> None:
+    for size in range(ngram_min, min(ngram_max, len(context)) + 1):
+        follow.setdefault(tuple(context[-size:]), []).append(token_id)
+
+
+def _decode_speculative_ngram_mlx(
+    *,
+    step,
+    token: object,
+    prompt_ids: list[int],
+    max_tokens: int,
+    eos_token_ids: set[int],
+    ngram_min: int,
+    ngram_max: int,
+    draft_tokens: int,
+    prefill_seconds: float,
+    timings: GenerationTimings,
+    mx,
+) -> tuple[list[int], float, float, float, GenerationTimings]:
+    generated: list[int] = []
+    context = list(prompt_ids)
+    follow = _build_ngram_follow_map(context, ngram_min=ngram_min, ngram_max=ngram_max)
+    decode_start = now()
+    first_token_seconds = 0.0
+
+    while len(generated) < max_tokens:
+        draft = _ngram_draft(
+            context,
+            follow,
+            ngram_min=ngram_min,
+            ngram_max=ngram_max,
+            draft_tokens=min(draft_tokens, max_tokens - len(generated)),
+        )
+        if not draft:
+            draft = [None]
+
+        for draft_token in draft:
+            token_start = now()
+            sync_start = now()
+            mx.eval(token)
+            timings.decode_sync_seconds += now() - sync_start
+            item_start = now()
+            target_token = int(token.item())
+            timings.decode_token_item_seconds += now() - item_start
+            if first_token_seconds == 0.0:
+                first_token_seconds = prefill_seconds + (now() - decode_start)
+            if draft_token is not None:
+                timings.speculative_draft_tokens += 1
+            if target_token in eos_token_ids:
+                timings.decode_token_latencies.append(now() - token_start)
+                return (
+                    generated,
+                    prefill_seconds,
+                    now() - decode_start,
+                    first_token_seconds,
+                    timings,
+                )
+
+            _remember_ngram_token(
+                context,
+                target_token,
+                follow,
+                ngram_min=ngram_min,
+                ngram_max=ngram_max,
+            )
+            generated.append(target_token)
+            context.append(target_token)
+            timings.decode_token_latencies.append(now() - token_start)
+            if draft_token == target_token:
+                timings.speculative_accepted_tokens += 1
+
+            if len(generated) >= max_tokens:
+                break
+
+            model_start = now()
+            token = step(token)
+            timings.decode_model_seconds += now() - model_start
+            sync_start = now()
+            mx.async_eval(token)
+            timings.decode_sync_seconds += now() - sync_start
+
+            if draft_token != target_token:
+                break
+
+    return generated, prefill_seconds, now() - decode_start, first_token_seconds, timings
+
+
 def _greedy_generate_tokens_mlx_generate_step(
     *,
     model: object,
@@ -1241,6 +1426,10 @@ def infer(
     append_to_session: bool = False,
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR,
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES,
+    speculative_ngram_min: int = 3,
+    speculative_ngram_max: int = 6,
+    speculative_draft_tokens: int = 4,
+    _decode_variant: DecodeVariant = "custom",
     mlx_memory_limit_gb: float | None = None,
     mlx_cache_limit_gb: float | None = None,
     mlx_wired_limit_gb: float | None = None,
@@ -1274,4 +1463,8 @@ def infer(
         session_id=session_id,
         reset_session=reset_session,
         append_to_session=append_to_session,
+        speculative_ngram_min=speculative_ngram_min,
+        speculative_ngram_max=speculative_ngram_max,
+        speculative_draft_tokens=speculative_draft_tokens,
+        _decode_variant=_decode_variant,
     )
