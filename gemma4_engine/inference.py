@@ -96,7 +96,7 @@ class Gemma4Engine:
         self.loaded = load_model(self.model_path)
         self.loaded.warnings.extend(memory_warnings)
         self.argmax_backend, self.backend_status = select_backend(self.backend)
-        self._prefix_cache: dict[str, PrefixCacheEntry] = {}
+        self._prefix_cache: OrderedDict[str, PrefixCacheEntry] = OrderedDict()
         self._sessions: OrderedDict[str, SessionState] = OrderedDict()
         self._token_cache = HierarchicalTokenCache(
             disk_dir=self.token_cache_dir,
@@ -149,6 +149,8 @@ class Gemma4Engine:
 
         if not hasattr(self, "_sessions"):
             self._sessions = OrderedDict()
+        if not hasattr(self, "_prefix_cache"):
+            self._prefix_cache = OrderedDict()
 
         if session_id and reset_session:
             self._sessions.pop(session_id, None)
@@ -205,6 +207,18 @@ class Gemma4Engine:
                 prefix_kv_cache_clone_seconds = now() - clone_start
                 prefill_ids = suffix_ids
                 prefix_tokens = len(prefix_ids)
+        elif not session_cache_hit:
+            prefix_lookup_start = now()
+            cached = self._find_longest_prefix_cache(prompt_ids, max_kv_size=max_kv_size)
+            prefix_kv_cache_lookup_seconds = now() - prefix_lookup_start
+            if cached is not None:
+                clone_start = now()
+                prompt_cache = _clone_prompt_cache(cached.cache)
+                prefix_kv_cache_clone_seconds = now() - clone_start
+                prefill_ids = prompt_ids[len(cached.token_ids) :]
+                prefix_cache_hit = True
+                prefix_tokens = len(cached.token_ids)
+                prefix_token_cache_source = "auto-kv"
 
         if session_id and append_to_session and prompt_cache is None:
             prompt_cache = _make_prompt_cache(self.loaded.model, max_kv_size=max_kv_size)
@@ -322,6 +336,28 @@ class Gemma4Engine:
     def clear_token_memory_cache(self) -> None:
         self._token_cache.clear_memory()
 
+    def _find_longest_prefix_cache(
+        self,
+        prompt_ids: list[int],
+        *,
+        max_kv_size: int | None = None,
+    ) -> PrefixCacheEntry | None:
+        best_key = None
+        best_entry = None
+        for key, entry in self._prefix_cache.items():
+            if not entry.token_ids:
+                continue
+            if _prefix_cache_key(entry.token_ids, max_kv_size=max_kv_size) != key:
+                continue
+            if best_entry is not None and len(entry.token_ids) <= len(best_entry.token_ids):
+                continue
+            if prompt_ids[: len(entry.token_ids)] == entry.token_ids:
+                best_key = key
+                best_entry = entry
+        if best_key is not None:
+            self._prefix_cache.move_to_end(best_key)
+        return best_entry
+
     def clear_sessions(self) -> None:
         self._sessions.clear()
 
@@ -427,6 +463,7 @@ class Gemma4Engine:
         key = _prefix_cache_key(prefix_ids, max_kv_size=max_kv_size)
         existing = self._prefix_cache.get(key)
         if existing is not None:
+            self._prefix_cache.move_to_end(key)
             return PrefixCacheBuildResult(existing, True, 0.0, timings)
 
         import mlx.core as mx
@@ -466,8 +503,9 @@ class Gemma4Engine:
 
         entry = PrefixCacheEntry(token_ids=list(prefix_ids), cache=_clone_prompt_cache(prompt_cache))
         if len(self._prefix_cache) >= self.max_prefix_cache_entries:
-            self._prefix_cache.pop(next(iter(self._prefix_cache)))
+            self._prefix_cache.popitem(last=False)
         self._prefix_cache[key] = entry
+        self._prefix_cache.move_to_end(key)
         return PrefixCacheBuildResult(entry, False, build_seconds, timings)
 
 

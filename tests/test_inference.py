@@ -397,6 +397,57 @@ def test_prefix_token_cache_uses_memory_then_disk(
     assert second_tokenizer.encode_calls == 1
 
 
+def test_automatic_longest_prefix_cache_reuses_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTokenizer:
+        def encode(self, text: str) -> list[int]:
+            return [ord(char) for char in text]
+
+        def decode(self, token_ids: list[int]) -> str:
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    engine = object.__new__(Gemma4Engine)
+    engine.model_path = "fake-model"
+    engine.loaded = SimpleNamespace(
+        tokenizer=FakeTokenizer(),
+        model=object(),
+        warnings=[],
+        config={},
+    )
+    engine.argmax_backend = SimpleNamespace(name="mlx")
+    engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
+    engine._prefix_cache = OrderedDict(
+        [
+            (
+                inference._prefix_cache_key([97]),
+                PrefixCacheEntry(token_ids=[97], cache=[]),
+            ),
+            (
+                inference._prefix_cache_key([97, 98]),
+                PrefixCacheEntry(token_ids=[97, 98], cache=[]),
+            ),
+        ]
+    )
+    engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
+    seen: dict[str, object] = {}
+
+    def greedy_generate_tokens(**kwargs):
+        seen["prompt_ids"] = kwargs["prompt_ids"]
+        seen["prompt_cache"] = kwargs["prompt_cache"]
+        return [33], 0.1, 0.2, 0.3, GenerationTimings()
+
+    monkeypatch.setattr(inference, "_greedy_generate_tokens", greedy_generate_tokens)
+
+    result = engine.infer("abcd", max_tokens=1, prompt_mode="raw")
+
+    assert result.prefix_cache_hit is True
+    assert result.prefix_tokens == 2
+    assert result.prefix_token_cache_source == "auto-kv"
+    assert seen["prompt_ids"] == [99, 100]
+    assert list(engine._prefix_cache.keys())[-1] == inference._prefix_cache_key([97, 98])
+
+
 def test_session_cache_reuses_prompt_cache_for_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

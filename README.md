@@ -69,7 +69,9 @@ gemma4 infer \
 
 The prompt should include the exact prefix text for token-for-token equivalence. Tokenized prefixes
 are cached in memory and persisted under `.gemma4-cache/prefix-tokens` by default. Prefilled KV
-cache state stays in process memory because it is made of live MLX tensors.
+cache state stays in process memory because it is made of live MLX tensors. The in-process prefix
+KV cache is LRU-managed and can automatically reuse the longest cached prefix that matches a later
+prompt.
 
 Tune or disable the disk token cache:
 
