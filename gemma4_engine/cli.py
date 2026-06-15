@@ -5,6 +5,7 @@ import sys
 
 from .benchmark import (
     DECODE_BENCHMARK_VARIANTS,
+    PREFILL_STEP_SIZES,
     PREFILL_SYNC_POLICIES,
     BenchConfig,
     benchmark_json,
@@ -185,7 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     bench_parser.add_argument(
         "--prefill-step-sizes",
         type=_csv_prefill_step_sizes,
-        default=None,
+        default=PREFILL_STEP_SIZES,
         help="comma-separated prefill chunk-size matrix for benchmark runs",
     )
     bench_parser.add_argument(

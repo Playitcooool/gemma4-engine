@@ -16,7 +16,14 @@ from .stats import RunStats, median_stats, reset_peak_memory
 
 PREFILL_CACHE_POLICIES: tuple[PrefillCachePolicy, ...] = ("clear", "retain")
 PREFILL_SYNC_POLICIES: tuple[PrefillSyncPolicy, ...] = ("eval",)
-PREFILL_STEP_SIZES: tuple[PrefillStepSize, ...] = ("auto",)
+PREFILL_STEP_SIZES: tuple[PrefillStepSize, ...] = (
+    "auto",
+    "512",
+    "1024",
+    "2048",
+    "4096",
+    "8192",
+)
 DECODE_BENCHMARK_VARIANTS: tuple[DecodeVariant, ...] = (
     "custom",
     "custom_no_async",
@@ -33,7 +40,7 @@ class BenchConfig:
     warmups: int = 1
     runs: int = 3
     prefill_step_size: PrefillStepSize = "auto"
-    prefill_step_sizes: tuple[PrefillStepSize, ...] | None = None
+    prefill_step_sizes: tuple[PrefillStepSize, ...] | None = PREFILL_STEP_SIZES
     prefill_sync_policies: tuple[PrefillSyncPolicy, ...] = PREFILL_SYNC_POLICIES
     kv_bits: int | None = None
     kv_group_size: int = 64

@@ -15,7 +15,7 @@ def test_bench_csv_defaults() -> None:
 
     assert args.prompt_tokens == "128,512,2048"
     assert args.decode_tokens == "64,128,256"
-    assert args.prefill_step_sizes is None
+    assert args.prefill_step_sizes == ("auto", "512", "1024", "2048", "4096", "8192")
     assert args.prefill_sync_policies is None
     assert args.prefill_cache_policy == "both"
 

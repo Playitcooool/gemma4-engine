@@ -125,6 +125,7 @@ class Gemma4Engine:
         prefix_kv_cache_lookup_seconds = 0.0
         prefix_kv_cache_clone_seconds = 0.0
         prefix_timings = GenerationTimings()
+        cached_prefix_entry = None
 
         if cache_prefix:
             prefix_text = _format_prompt(self.loaded.tokenizer, cache_prefix, cache_prefix_mode)
@@ -156,6 +157,7 @@ class Gemma4Engine:
             )
             prefix_kv_cache_lookup_seconds = now() - prefix_lookup_start
             cached = prefix_result.entry
+            cached_prefix_entry = cached
             prefix_cache_hit = prefix_result.hit
             prefix_cache_build_seconds = prefix_result.seconds
             prefix_timings = prefix_result.timings
@@ -181,22 +183,23 @@ class Gemma4Engine:
                     "shared-KV caches are incompatible with quantized KV entries"
                 )
 
+        generation_prefill_step_size = _prefill_step_size(prefill_step_size, len(prefill_ids))
         generated, prefill_seconds, decode_seconds, first_token_seconds, generation_timings = (
-            _greedy_generate_tokens(
-                model=self.loaded.model,
+            self._generate_with_oom_retry(
                 prompt_ids=prefill_ids,
                 max_tokens=max_tokens,
-                backend=self.argmax_backend,
-                prefill_step_size=_prefill_step_size(prefill_step_size, len(prefill_ids)),
+                initial_prefill_step_size=generation_prefill_step_size,
                 eos_token_ids=eos_ids,
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
                 max_kv_size=max_kv_size,
                 prompt_cache=prompt_cache,
+                cached_prefix_entry=cached_prefix_entry,
                 decode_variant=_decode_variant,
                 prefill_cache_policy=prefill_cache_policy,
                 prefill_sync_policy=prefill_sync_policy,
+                config_warnings=config_warnings,
             )
         )
         prefill_model_seconds = (
@@ -256,6 +259,63 @@ class Gemma4Engine:
 
     def clear_token_memory_cache(self) -> None:
         self._token_cache.clear_memory()
+
+    def _generate_with_oom_retry(
+        self,
+        *,
+        prompt_ids: list[int],
+        max_tokens: int,
+        initial_prefill_step_size: int,
+        eos_token_ids: set[int],
+        kv_bits: int | None,
+        kv_group_size: int,
+        quantized_kv_start: int,
+        max_kv_size: int | None,
+        prompt_cache: list[object] | None,
+        cached_prefix_entry: PrefixCacheEntry | None,
+        decode_variant: DecodeVariant,
+        prefill_cache_policy: PrefillCachePolicy,
+        prefill_sync_policy: PrefillSyncPolicy,
+        config_warnings: list[str],
+    ) -> tuple[list[int], float, float, float, GenerationTimings]:
+        prefill_step_size = initial_prefill_step_size
+        current_prompt_cache = prompt_cache
+        warned = False
+        while True:
+            try:
+                return _greedy_generate_tokens(
+                    model=self.loaded.model,
+                    prompt_ids=prompt_ids,
+                    max_tokens=max_tokens,
+                    backend=self.argmax_backend,
+                    prefill_step_size=prefill_step_size,
+                    eos_token_ids=eos_token_ids,
+                    kv_bits=kv_bits,
+                    kv_group_size=kv_group_size,
+                    quantized_kv_start=quantized_kv_start,
+                    max_kv_size=max_kv_size,
+                    prompt_cache=current_prompt_cache,
+                    decode_variant=decode_variant,
+                    prefill_cache_policy=prefill_cache_policy,
+                    prefill_sync_policy=prefill_sync_policy,
+                )
+            except RuntimeError as exc:
+                next_step_size = _smaller_prefill_step_size(prefill_step_size)
+                if next_step_size is None or not _is_mlx_memory_error(exc):
+                    raise
+                _clear_mlx_runtime_cache()
+                prefill_step_size = next_step_size
+                current_prompt_cache = (
+                    _clone_prompt_cache(cached_prefix_entry.cache)
+                    if cached_prefix_entry is not None
+                    else None
+                )
+                if not warned:
+                    config_warnings.append(
+                        "MLX memory pressure during generation; retried with smaller "
+                        f"prefill chunks starting at {prefill_step_size}"
+                    )
+                    warned = True
 
     def _get_or_create_prefix_cache(
         self,
@@ -375,9 +435,44 @@ def _decode(tokenizer: object, token_ids: list[int]) -> str:
 
 
 def _prefill_step_size(value: PrefillStepSize, prompt_tokens: int) -> int:
-    if value == "auto":
-        return 512
-    return int(value)
+    if value != "auto":
+        return int(value)
+    if prompt_tokens <= 1024:
+        return 1024
+    if prompt_tokens <= 8192:
+        return 2048
+    if prompt_tokens <= 32768:
+        return 4096
+    return 8192
+
+
+def _smaller_prefill_step_size(value: int) -> int | None:
+    for candidate in (4096, 2048, 1024, 512):
+        if value > candidate:
+            return candidate
+    return None
+
+
+def _is_mlx_memory_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return any(
+        phrase in message
+        for phrase in (
+            "out of memory",
+            "oom",
+            "failed to allocate",
+            "memory limit",
+            "metal",
+        )
+    )
+
+
+def _clear_mlx_runtime_cache() -> None:
+    try:
+        import mlx.core as mx
+    except Exception:
+        return
+    mx.clear_cache()
 
 
 def _decode_latency_stats(latencies: list[float]) -> tuple[float | None, float | None, float | None]:

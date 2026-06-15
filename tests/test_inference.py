@@ -16,10 +16,13 @@ from gemma4_engine.inference import (
 
 
 def test_auto_prefill_step_size_limits_long_prompt_chunks() -> None:
-    assert _prefill_step_size("auto", 128) == 512
-    assert _prefill_step_size("auto", 512) == 512
-    assert _prefill_step_size("auto", 2048) == 512
-    assert _prefill_step_size("auto", 8192) == 512
+    assert _prefill_step_size("auto", 128) == 1024
+    assert _prefill_step_size("auto", 512) == 1024
+    assert _prefill_step_size("auto", 2048) == 2048
+    assert _prefill_step_size("auto", 8192) == 2048
+    assert _prefill_step_size("auto", 16384) == 4096
+    assert _prefill_step_size("auto", 65536) == 8192
+    assert _prefill_step_size("512", 65536) == 512
 
 
 def test_prefix_cache_key_depends_on_token_sequence() -> None:
@@ -197,6 +200,56 @@ def test_internal_decode_variant_is_passed_to_greedy_loop(
     assert seen["prefill_cache_policy"] == "retain"
     assert seen["prefill_sync_policy"] == "none"
     assert seen["max_kv_size"] == 4096
+
+
+def test_generation_oom_retries_with_smaller_prefill_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTokenizer:
+        def encode(self, text: str) -> list[int]:
+            return [ord(char) for char in text]
+
+        def decode(self, token_ids: list[int]) -> str:
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    engine = object.__new__(Gemma4Engine)
+    engine.model_path = "fake-model"
+    engine.loaded = SimpleNamespace(
+        tokenizer=FakeTokenizer(),
+        model=object(),
+        warnings=[],
+        config={},
+    )
+    engine.argmax_backend = SimpleNamespace(name="mlx")
+    engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
+    engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
+    seen_step_sizes: list[int] = []
+    cleared = False
+
+    def greedy_generate_tokens(**kwargs):
+        seen_step_sizes.append(kwargs["prefill_step_size"])
+        if kwargs["prefill_step_size"] == 8192:
+            raise RuntimeError("out of memory")
+        return [33], 0.1, 0.2, 0.3, GenerationTimings()
+
+    def clear_cache():
+        nonlocal cleared
+        cleared = True
+
+    monkeypatch.setattr(inference, "_greedy_generate_tokens", greedy_generate_tokens)
+    monkeypatch.setattr(inference, "_clear_mlx_runtime_cache", clear_cache)
+
+    result = engine.infer(
+        "ab",
+        max_tokens=1,
+        prompt_mode="raw",
+        prefill_step_size="8192",
+    )
+
+    assert result.text == "!"
+    assert seen_step_sizes == [8192, 4096]
+    assert cleared is True
+    assert "retried with smaller prefill chunks" in result.config_warnings[0]
 
 
 def test_prefix_token_cache_uses_memory_then_disk(

@@ -83,9 +83,9 @@ gemma4 infer --token-cache-dir "" --prompt "Say hi."
 
 `--backend auto` and `--backend mlx` both use the MLX runtime.
 
-The default `--prefill-step-size auto` uses 512-token prefill chunks. The benchmark command reports
-median prefill tok/s, decode tok/s, total tok/s, time to first token, peak memory, and speedups
-against the baseline row.
+The default `--prefill-step-size auto` is adaptive: 1024-token chunks for short prompts, then 2048,
+4096, and 8192 as prompt length grows. The benchmark command reports median prefill tok/s, decode
+tok/s, total tok/s, time to first token, peak memory, and speedups against the baseline row.
 
 Useful benchmark sweeps:
 
