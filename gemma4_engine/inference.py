@@ -242,13 +242,6 @@ class Gemma4Engine:
             eos_ids.add(int(eos_token_id))
 
         config_warnings = list(self.loaded.warnings)
-        if kv_bits is not None and self.loaded.config.get("model_type") == "gemma4":
-            if self.loaded.config.get("text_config", {}).get("num_kv_shared_layers", 0) > 0:
-                kv_bits = None
-                config_warnings.append(
-                    "KV cache quantization disabled because current mlx_lm Gemma 4 "
-                    "shared-KV caches are incompatible with quantized KV entries"
-                )
 
         generation_prefill_step_size = _prefill_step_size(prefill_step_size, len(prefill_ids))
         decode_variant = _resolve_decode_variant(
@@ -997,20 +990,6 @@ def _greedy_generate_tokens_mlx(
     processed = 0
     timings = GenerationTimings(decode_token_latencies=[])
 
-    def quantize_supported_cache_entries() -> None:
-        if kv_bits is None:
-            return
-        for index, entry in enumerate(prompt_cache):
-            if not hasattr(entry, "to_quantized") or entry.offset < quantized_kv_start:
-                continue
-            try:
-                prompt_cache[index] = entry.to_quantized(
-                    group_size=kv_group_size,
-                    bits=kv_bits,
-                )
-            except NotImplementedError:
-                continue
-
     def model_call(input_tokens: object) -> object:
         return model(input_tokens[None], cache=prompt_cache)
 
@@ -1053,7 +1032,12 @@ def _greedy_generate_tokens_mlx(
             first_token_start = now()
             token = step(prompt[processed:])
             timings.prefill_model_seconds += now() - first_token_start
-            quantize_supported_cache_entries()
+            _quantize_supported_cache_entries(
+                prompt_cache,
+                kv_bits=kv_bits,
+                kv_group_size=kv_group_size,
+                quantized_kv_start=quantized_kv_start,
+            )
             sync_start = now()
             mx.async_eval(token)
             mx.eval(token)
@@ -1171,6 +1155,30 @@ def _greedy_generate_tokens_mlx(
         decode_seconds = now() - decode_start
 
     return generated, prefill_seconds, decode_seconds, first_token_seconds, timings
+
+
+def _quantize_supported_cache_entries(
+    prompt_cache: list[object],
+    *,
+    kv_bits: int | None,
+    kv_group_size: int,
+    quantized_kv_start: int,
+) -> None:
+    if kv_bits is None:
+        return
+    for index, entry in enumerate(prompt_cache):
+        if (
+            not hasattr(entry, "to_quantized")
+            or getattr(entry, "offset", 0) < quantized_kv_start
+        ):
+            continue
+        try:
+            prompt_cache[index] = entry.to_quantized(
+                group_size=kv_group_size,
+                bits=kv_bits,
+            )
+        except NotImplementedError:
+            continue
 
 
 def _blockwise_decode_size(decode_variant: DecodeVariant) -> int | None:

@@ -207,3 +207,6 @@ gemma4 serve \
   --mlx-cache-limit-gb 40 \
   --mlx-wired-limit-gb 32
 ```
+
+`--kv-bits` quantizes only cache entries that support MLX-LM `to_quantized`; unsupported shared-KV
+entries stay at their original precision instead of disabling quantization for the whole cache.

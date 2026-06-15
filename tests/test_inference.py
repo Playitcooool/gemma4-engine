@@ -20,6 +20,7 @@ from gemma4_engine.inference import (
     _prefix_cache_key,
     _prefix_cache_entry_bytes,
     _prefill_step_size,
+    _quantize_supported_cache_entries,
     _resolve_decode_variant,
     _sync_prompt_cache,
 )
@@ -141,6 +142,49 @@ def test_resolve_decode_variant_uses_blockwise_for_non_stream_default() -> None:
         decode_variant="custom_speculative_ngram",
         non_stream_decode_variant="custom_blockwise_16",
     ) == "custom_speculative_ngram"
+
+
+def test_quantize_supported_cache_entries_skips_unsupported_entries() -> None:
+    class SupportedEntry:
+        offset = 8
+
+        def __init__(self) -> None:
+            self.quantized = False
+
+        def to_quantized(self, *, group_size: int, bits: int):
+            quantized = SupportedEntry()
+            quantized.quantized = True
+            quantized.group_size = group_size
+            quantized.bits = bits
+            return quantized
+
+    class UnsupportedEntry:
+        offset = 8
+
+        def to_quantized(self, *, group_size: int, bits: int):
+            raise NotImplementedError
+
+    before_start = SupportedEntry()
+    before_start.offset = 1
+    supported = SupportedEntry()
+    unsupported = UnsupportedEntry()
+    plain = SimpleNamespace(offset=8)
+    prompt_cache = [before_start, supported, unsupported, plain]
+
+    _quantize_supported_cache_entries(
+        prompt_cache,
+        kv_bits=4,
+        kv_group_size=64,
+        quantized_kv_start=4,
+    )
+
+    assert prompt_cache[0] is before_start
+    assert prompt_cache[1] is not supported
+    assert prompt_cache[1].quantized is True
+    assert prompt_cache[1].group_size == 64
+    assert prompt_cache[1].bits == 4
+    assert prompt_cache[2] is unsupported
+    assert prompt_cache[3] is plain
 
 
 def test_ngram_draft_uses_longest_recent_match() -> None:
@@ -411,6 +455,58 @@ def test_internal_decode_variant_is_passed_to_greedy_loop(
     assert seen["prefill_cache_policy"] == "retain"
     assert seen["prefill_sync_policy"] == "none"
     assert seen["max_kv_size"] == 4096
+
+
+def test_gemma4_shared_kv_keeps_requested_kv_bits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTokenizer:
+        eos_token_id = 2
+
+        def encode(self, text: str) -> list[int]:
+            return [ord(char) for char in text]
+
+        def decode(self, token_ids: list[int]) -> str:
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    seen: dict[str, object] = {}
+    engine = object.__new__(Gemma4Engine)
+    engine.model_path = "fake-model"
+    engine.loaded = SimpleNamespace(
+        tokenizer=FakeTokenizer(),
+        model=object(),
+        warnings=[],
+        config={
+            "model_type": "gemma4",
+            "text_config": {"num_kv_shared_layers": 4},
+        },
+    )
+    engine.argmax_backend = SimpleNamespace(name="mlx")
+    engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
+    engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
+
+    def greedy_generate_tokens(**kwargs):
+        seen["kv_bits"] = kwargs["kv_bits"]
+        seen["kv_group_size"] = kwargs["kv_group_size"]
+        seen["quantized_kv_start"] = kwargs["quantized_kv_start"]
+        return [33], 0.1, 0.2, 0.3, GenerationTimings()
+
+    monkeypatch.setattr(inference, "_greedy_generate_tokens", greedy_generate_tokens)
+
+    result = engine.infer(
+        "ab",
+        max_tokens=1,
+        prompt_mode="raw",
+        kv_bits=4,
+        kv_group_size=128,
+        quantized_kv_start=16,
+    )
+
+    assert result.text == "!"
+    assert result.config_warnings == []
+    assert seen["kv_bits"] == 4
+    assert seen["kv_group_size"] == 128
+    assert seen["quantized_kv_start"] == 16
 
 
 def test_generation_oom_retries_with_smaller_prefill_chunk(
