@@ -174,6 +174,16 @@ gemma4 bench \
   --speculative-draft-tokens 4
 ```
 
+For one-shot non-streaming responses, `--no-stream` switches from the streaming-safe `custom`
+decoder to `custom_blockwise_16` by default:
+
+```bash
+gemma4 infer --prompt "Summarize this." --no-stream
+curl -s http://127.0.0.1:8000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Summarize this.","stream":false}'
+```
+
 `--prefill-cache-policy retain` keeps the MLX allocator cache between prefill chunks. It can improve
 prefill throughput on some runs but may spend more memory, so keep it benchmark-gated.
 

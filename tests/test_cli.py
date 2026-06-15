@@ -92,6 +92,8 @@ def test_single_user_fast_profile_defaults() -> None:
     assert args.prefill_sync_every == 4
     assert args.prefill_cache_clear_every == 8
     assert args.decode_variant == "custom"
+    assert args.stream is True
+    assert args.non_stream_decode_variant == "custom_blockwise_16"
     assert args.max_sessions == 4
 
 
@@ -188,6 +190,9 @@ def test_infer_advanced_flags_still_parse() -> None:
             "4096",
             "--decode-variant",
             "custom_speculative_ngram",
+            "--no-stream",
+            "--non-stream-decode-variant",
+            "custom_blockwise_32",
             "--speculative-ngram-min",
             "2",
             "--speculative-ngram-max",
@@ -223,6 +228,8 @@ def test_infer_advanced_flags_still_parse() -> None:
     assert args.kv_bits == 4
     assert args.max_kv_size == 4096
     assert args.decode_variant == "custom_speculative_ngram"
+    assert args.stream is False
+    assert args.non_stream_decode_variant == "custom_blockwise_32"
     assert args.speculative_ngram_min == 2
     assert args.speculative_ngram_max == 5
     assert args.speculative_draft_tokens == 7

@@ -40,6 +40,8 @@ class ServerConfig:
     default_quantized_kv_start: int = 0
     default_max_kv_size: int | None = None
     default_decode_variant: DecodeVariant = "custom"
+    default_stream: bool = True
+    default_non_stream_decode_variant: DecodeVariant = "custom_blockwise_16"
     default_speculative_ngram_min: int = 3
     default_speculative_ngram_max: int = 6
     default_speculative_draft_tokens: int = 4
@@ -87,6 +89,8 @@ class EngineService:
             "default_prefill_cache_threshold_gb": self.config.default_prefill_cache_threshold_gb,
             "default_max_kv_size": self.config.default_max_kv_size,
             "default_decode_variant": self.config.default_decode_variant,
+            "default_stream": self.config.default_stream,
+            "default_non_stream_decode_variant": self.config.default_non_stream_decode_variant,
             "default_speculative_ngram_min": self.config.default_speculative_ngram_min,
             "default_speculative_ngram_max": self.config.default_speculative_ngram_max,
             "default_speculative_draft_tokens": self.config.default_speculative_draft_tokens,
@@ -187,6 +191,24 @@ class EngineService:
         ):
             raise ValueError("decode_variant is invalid")
 
+        stream = bool(payload.get("stream", self.config.default_stream))
+        non_stream_decode_variant = payload.get(
+            "non_stream_decode_variant",
+            self.config.default_non_stream_decode_variant,
+        )
+        if non_stream_decode_variant not in (
+            "custom",
+            "custom_no_async",
+            "custom_eval_next",
+            "custom_defer_ids",
+            "custom_blockwise_8",
+            "custom_blockwise_16",
+            "custom_blockwise_32",
+            "custom_speculative_ngram",
+            "mlx_lm_generate_step",
+        ):
+            raise ValueError("non_stream_decode_variant is invalid")
+
         speculative_ngram_min = int(
             payload.get("speculative_ngram_min", self.config.default_speculative_ngram_min)
         )
@@ -243,6 +265,8 @@ class EngineService:
                 speculative_ngram_min=speculative_ngram_min,
                 speculative_ngram_max=speculative_ngram_max,
                 speculative_draft_tokens=speculative_draft_tokens,
+                stream=stream,
+                non_stream_decode_variant=non_stream_decode_variant,
                 _decode_variant=decode_variant,
             )
 
@@ -259,6 +283,9 @@ class EngineService:
             "session_tokens_reused": result.stats.session_tokens_reused,
             "session_count": result.stats.session_count,
             "speculative_acceptance_rate": result.stats.speculative_acceptance_rate,
+            "stream": stream,
+            "decode_variant": decode_variant,
+            "non_stream_decode_variant": non_stream_decode_variant,
         }
 
 

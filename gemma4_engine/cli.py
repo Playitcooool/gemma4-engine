@@ -29,6 +29,8 @@ class RuntimeProfile:
     prefill_sync_every: int = 4
     prefill_cache_clear_every: int = 8
     decode_variant: DecodeVariant = "custom"
+    stream: bool = True
+    non_stream_decode_variant: DecodeVariant = "custom_blockwise_16"
     max_sessions: int = 8
 
 
@@ -172,6 +174,8 @@ def _resolve_profile_defaults(args: argparse.Namespace) -> None:
         "prefill_sync_every",
         "prefill_cache_clear_every",
         "decode_variant",
+        "stream",
+        "non_stream_decode_variant",
         "max_sessions",
     ):
         if hasattr(args, name) and getattr(args, name) is None:
@@ -248,6 +252,8 @@ def _run_chat(args) -> int:
                 speculative_ngram_min=args.speculative_ngram_min,
                 speculative_ngram_max=args.speculative_ngram_max,
                 speculative_draft_tokens=args.speculative_draft_tokens,
+                stream=args.stream,
+                non_stream_decode_variant=args.non_stream_decode_variant,
                 _decode_variant=args.decode_variant,
             )
         except RuntimeError as exc:
@@ -301,6 +307,17 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--quantized-kv-start", type=int, default=0)
     infer_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
     infer_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default=None)
+    infer_parser.add_argument(
+        "--stream",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="use streaming-safe per-token decode; --no-stream uses the non-stream decode variant",
+    )
+    infer_parser.add_argument(
+        "--non-stream-decode-variant",
+        choices=_decode_variant_choices(),
+        default=None,
+    )
     infer_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
     infer_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
     infer_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
@@ -424,6 +441,17 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--quantized-kv-start", type=int, default=0)
     serve_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
     serve_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default=None)
+    serve_parser.add_argument(
+        "--stream",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="default stream mode for /generate requests",
+    )
+    serve_parser.add_argument(
+        "--non-stream-decode-variant",
+        choices=_decode_variant_choices(),
+        default=None,
+    )
     serve_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
     serve_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
     serve_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
@@ -475,6 +503,16 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     chat_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
     chat_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default=None)
+    chat_parser.add_argument(
+        "--stream",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    chat_parser.add_argument(
+        "--non-stream-decode-variant",
+        choices=_decode_variant_choices(),
+        default=None,
+    )
     chat_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
     chat_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
     chat_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
@@ -517,6 +555,8 @@ def main(argv: list[str] | None = None) -> int:
                 speculative_ngram_min=args.speculative_ngram_min,
                 speculative_ngram_max=args.speculative_ngram_max,
                 speculative_draft_tokens=args.speculative_draft_tokens,
+                stream=args.stream,
+                non_stream_decode_variant=args.non_stream_decode_variant,
                 _decode_variant=args.decode_variant,
                 mlx_memory_limit_gb=args.mlx_memory_limit_gb,
                 mlx_cache_limit_gb=args.mlx_cache_limit_gb,
@@ -636,6 +676,8 @@ def main(argv: list[str] | None = None) -> int:
                     default_quantized_kv_start=args.quantized_kv_start,
                     default_max_kv_size=args.max_kv_size,
                     default_decode_variant=args.decode_variant,
+                    default_stream=args.stream,
+                    default_non_stream_decode_variant=args.non_stream_decode_variant,
                     default_speculative_ngram_min=args.speculative_ngram_min,
                     default_speculative_ngram_max=args.speculative_ngram_max,
                     default_speculative_draft_tokens=args.speculative_draft_tokens,

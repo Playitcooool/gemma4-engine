@@ -135,6 +135,8 @@ class Gemma4Engine:
         speculative_ngram_min: int = 3,
         speculative_ngram_max: int = 6,
         speculative_draft_tokens: int = 4,
+        stream: bool = True,
+        non_stream_decode_variant: DecodeVariant = "custom_blockwise_16",
         _decode_variant: DecodeVariant = "custom",
     ) -> GenerationResult:
         encode_start = now()
@@ -248,6 +250,11 @@ class Gemma4Engine:
                 )
 
         generation_prefill_step_size = _prefill_step_size(prefill_step_size, len(prefill_ids))
+        decode_variant = _resolve_decode_variant(
+            stream=stream,
+            decode_variant=_decode_variant,
+            non_stream_decode_variant=non_stream_decode_variant,
+        )
         generated, prefill_seconds, decode_seconds, first_token_seconds, generation_timings = (
             self._generate_with_oom_retry(
                 prompt_ids=prefill_ids,
@@ -260,7 +267,7 @@ class Gemma4Engine:
                 max_kv_size=max_kv_size,
                 prompt_cache=prompt_cache,
                 cached_prefix_entry=cached_prefix_entry,
-                decode_variant=_decode_variant,
+                decode_variant=decode_variant,
                 prefill_cache_policy=prefill_cache_policy,
                 prefill_sync_policy=prefill_sync_policy,
                 prefill_sync_every=prefill_sync_every,
@@ -1132,6 +1139,19 @@ def _blockwise_decode_size(decode_variant: DecodeVariant) -> int | None:
     return None
 
 
+def _resolve_decode_variant(
+    *,
+    stream: bool,
+    decode_variant: DecodeVariant,
+    non_stream_decode_variant: DecodeVariant,
+) -> DecodeVariant:
+    if stream:
+        return decode_variant
+    if decode_variant == "custom":
+        return non_stream_decode_variant
+    return decode_variant
+
+
 def _decode_blockwise_mlx(
     *,
     step,
@@ -1429,6 +1449,8 @@ def infer(
     speculative_ngram_min: int = 3,
     speculative_ngram_max: int = 6,
     speculative_draft_tokens: int = 4,
+    stream: bool = True,
+    non_stream_decode_variant: DecodeVariant = "custom_blockwise_16",
     _decode_variant: DecodeVariant = "custom",
     mlx_memory_limit_gb: float | None = None,
     mlx_cache_limit_gb: float | None = None,
@@ -1466,5 +1488,7 @@ def infer(
         speculative_ngram_min=speculative_ngram_min,
         speculative_ngram_max=speculative_ngram_max,
         speculative_draft_tokens=speculative_draft_tokens,
+        stream=stream,
+        non_stream_decode_variant=non_stream_decode_variant,
         _decode_variant=_decode_variant,
     )

@@ -19,6 +19,7 @@ from gemma4_engine.inference import (
     _build_ngram_follow_map,
     _prefix_cache_key,
     _prefill_step_size,
+    _resolve_decode_variant,
     _sync_prompt_cache,
 )
 
@@ -121,6 +122,24 @@ def test_blockwise_decode_stops_at_eos_boundary() -> None:
     assert _blockwise_decode_size("custom_blockwise_32") == 32
     assert generated == [1, 2]
     assert timings.decode_token_latencies
+
+
+def test_resolve_decode_variant_uses_blockwise_for_non_stream_default() -> None:
+    assert _resolve_decode_variant(
+        stream=True,
+        decode_variant="custom",
+        non_stream_decode_variant="custom_blockwise_16",
+    ) == "custom"
+    assert _resolve_decode_variant(
+        stream=False,
+        decode_variant="custom",
+        non_stream_decode_variant="custom_blockwise_16",
+    ) == "custom_blockwise_16"
+    assert _resolve_decode_variant(
+        stream=False,
+        decode_variant="custom_speculative_ngram",
+        non_stream_decode_variant="custom_blockwise_16",
+    ) == "custom_speculative_ngram"
 
 
 def test_ngram_draft_uses_longest_recent_match() -> None:
