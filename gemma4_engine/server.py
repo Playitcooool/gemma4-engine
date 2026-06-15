@@ -42,6 +42,7 @@ class ServerConfig:
     default_cache_prefix_mode: PromptMode = "raw"
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES
+    max_sessions: int = 8
     mlx_memory_limit_gb: float | None = None
     mlx_cache_limit_gb: float | None = None
     mlx_wired_limit_gb: float | None = None
@@ -55,6 +56,7 @@ class EngineService:
             backend=config.backend,
             token_cache_dir=config.token_cache_dir,
             max_token_cache_disk_bytes=config.max_token_cache_disk_bytes,
+            max_sessions=config.max_sessions,
             mlx_memory_limit_gb=config.mlx_memory_limit_gb,
             mlx_cache_limit_gb=config.mlx_cache_limit_gb,
             mlx_wired_limit_gb=config.mlx_wired_limit_gb,
@@ -71,6 +73,8 @@ class EngineService:
             "config_warnings": self.engine.loaded.warnings,
             "token_cache_dir": self.config.token_cache_dir,
             "max_token_cache_disk_bytes": self.config.max_token_cache_disk_bytes,
+            "max_sessions": self.config.max_sessions,
+            "sessions": self.engine.list_sessions(),
             "default_prefill_cache_policy": self.config.default_prefill_cache_policy,
             "default_prefill_sync_policy": self.config.default_prefill_sync_policy,
             "default_prefill_sync_every": self.config.default_prefill_sync_every,
@@ -171,6 +175,12 @@ class EngineService:
         if cache_prefix_mode not in ("chat", "raw"):
             raise ValueError("cache_prefix_mode must be 'chat' or 'raw'")
 
+        session_id = payload.get("session_id")
+        if session_id is not None and not isinstance(session_id, str):
+            raise ValueError("session_id must be a string when provided")
+        reset_session = bool(payload.get("reset_session", False))
+        append_to_session = bool(payload.get("append_to_session", session_id is not None))
+
         with self._lock:
             result = self.engine.infer(
                 prompt,
@@ -188,6 +198,9 @@ class EngineService:
                 max_kv_size=max_kv_size,
                 cache_prefix=cache_prefix,
                 cache_prefix_mode=cache_prefix_mode,
+                session_id=session_id,
+                reset_session=reset_session,
+                append_to_session=append_to_session,
             )
 
         return {
@@ -199,6 +212,9 @@ class EngineService:
             "prefix_cache_hit": result.prefix_cache_hit,
             "prefix_tokens": result.prefix_tokens,
             "prefix_token_cache_source": result.prefix_token_cache_source,
+            "session_cache_hit": result.stats.session_cache_hit,
+            "session_tokens_reused": result.stats.session_tokens_reused,
+            "session_count": result.stats.session_count,
         }
 
 

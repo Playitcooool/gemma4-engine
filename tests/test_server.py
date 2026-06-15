@@ -23,6 +23,7 @@ class FakeService(EngineService):
             ),
             loaded=SimpleNamespace(warnings=[]),
             infer=self._infer,
+            list_sessions=lambda: [{"session_id": "main", "tokens": 3}],
         )
         self._lock = threading.Lock()
         self._seen = None
@@ -40,6 +41,9 @@ class FakeService(EngineService):
                 prefill_seconds=0.5,
                 decode_seconds=0.25,
                 time_to_first_token_seconds=0.6,
+                session_cache_hit=bool(kwargs.get("session_id")),
+                session_tokens_reused=3 if kwargs.get("session_id") else 0,
+                session_count=1 if kwargs.get("session_id") else 0,
             ),
             backend_reason="test",
             config_warnings=[],
@@ -70,6 +74,9 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
             "prefill_sync_every": 3,
             "prefill_cache_clear_every": 5,
             "prefill_cache_threshold_gb": 12,
+            "session_id": "main",
+            "reset_session": False,
+            "append_to_session": True,
             "max_kv_size": 4096,
         }
     )
@@ -79,6 +86,9 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
     assert response["prefix_cache_hit"] is False
     assert response["prefix_tokens"] == 0
     assert response["prefix_token_cache_source"] is None
+    assert response["session_cache_hit"] is True
+    assert response["session_tokens_reused"] == 3
+    assert response["session_count"] == 1
     assert service._seen["prompt"] == "hello"
     assert service._seen["max_tokens"] == 4
     assert service._seen["prompt_mode"] == "raw"
@@ -88,6 +98,9 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
     assert service._seen["prefill_sync_every"] == 3
     assert service._seen["prefill_cache_clear_every"] == 5
     assert service._seen["prefill_cache_threshold_gb"] == 12
+    assert service._seen["session_id"] == "main"
+    assert service._seen["reset_session"] is False
+    assert service._seen["append_to_session"] is True
     assert service._seen["max_kv_size"] == 4096
 
 
@@ -97,6 +110,8 @@ def test_health_reports_loaded_backend() -> None:
     assert service.health()["backend_selected"] == "mlx"
     assert service.health()["token_cache_dir"] == ".gemma4-cache/prefix-tokens"
     assert service.health()["max_token_cache_disk_bytes"] == 123_000_000
+    assert service.health()["max_sessions"] == 8
+    assert service.health()["sessions"] == [{"session_id": "main", "tokens": 3}]
     assert service.health()["default_prefill_cache_policy"] == "clear"
     assert service.health()["default_prefill_sync_policy"] == "eval"
     assert service.health()["default_prefill_sync_every"] == 4

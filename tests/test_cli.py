@@ -128,6 +128,17 @@ def test_token_cache_dir_empty_string_disables_disk_cache() -> None:
 
 def test_serve_token_cache_max_disk_mb_parses() -> None:
     parser = build_parser()
-    args = parser.parse_args(["serve", "--token-cache-max-disk-mb", "250"])
+    args = parser.parse_args(
+        [
+            "serve",
+            "--token-cache-max-disk-mb",
+            "250",
+            "--enable-sessions",
+            "--max-sessions",
+            "4",
+        ]
+    )
 
     assert args.token_cache_max_disk_mb == 250
+    assert args.enable_sessions is True
+    assert args.max_sessions == 4

@@ -34,6 +34,9 @@ class RunStats:
     decode_token_latency_p50_seconds: float | None = None
     decode_token_latency_p95_seconds: float | None = None
     decode_token_latency_max_seconds: float | None = None
+    session_cache_hit: bool = False
+    session_tokens_reused: int = 0
+    session_count: int | None = None
 
     @property
     def prefill_tokens_per_second(self) -> float:

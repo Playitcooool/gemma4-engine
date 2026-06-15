@@ -1,4 +1,5 @@
 import types
+from collections import OrderedDict
 from types import SimpleNamespace
 
 import pytest
@@ -394,3 +395,67 @@ def test_prefix_token_cache_uses_memory_then_disk(
     assert third.prefix_token_cache_source == "disk"
     assert first_tokenizer.encode_calls == 3
     assert second_tokenizer.encode_calls == 1
+
+
+def test_session_cache_reuses_prompt_cache_for_followup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTokenizer:
+        def encode(self, text: str) -> list[int]:
+            return [ord(char) for char in text]
+
+        def decode(self, token_ids: list[int]) -> str:
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    engine = object.__new__(Gemma4Engine)
+    engine.model_path = "fake-model"
+    engine.loaded = SimpleNamespace(
+        tokenizer=FakeTokenizer(),
+        model=object(),
+        warnings=[],
+        config={},
+    )
+    engine.argmax_backend = SimpleNamespace(name="mlx")
+    engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
+    engine._prefix_cache = {}
+    engine._sessions = OrderedDict()
+    engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
+    session_cache = [SimpleNamespace(state=[])]
+    seen_prompt_ids: list[list[int]] = []
+    seen_caches: list[object] = []
+
+    monkeypatch.setattr(
+        inference,
+        "_make_prompt_cache",
+        lambda _model, max_kv_size=None: session_cache,
+    )
+
+    def greedy_generate_tokens(**kwargs):
+        seen_prompt_ids.append(kwargs["prompt_ids"])
+        seen_caches.append(kwargs["prompt_cache"])
+        return [33], 0.1, 0.2, 0.3, GenerationTimings()
+
+    monkeypatch.setattr(inference, "_greedy_generate_tokens", greedy_generate_tokens)
+
+    first = engine.infer(
+        "ab",
+        max_tokens=1,
+        prompt_mode="raw",
+        session_id="main",
+        append_to_session=True,
+    )
+    second = engine.infer(
+        "cd",
+        max_tokens=1,
+        prompt_mode="raw",
+        session_id="main",
+        append_to_session=True,
+    )
+
+    assert first.stats.session_cache_hit is False
+    assert first.stats.session_count == 1
+    assert second.stats.session_cache_hit is True
+    assert second.stats.session_tokens_reused == 3
+    assert seen_prompt_ids == [[97, 98], [99, 100]]
+    assert seen_caches == [session_cache, session_cache]
+    assert engine.list_sessions()[0]["tokens"] == 6

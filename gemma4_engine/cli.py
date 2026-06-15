@@ -235,6 +235,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--backend", choices=["mlx", "auto"], default="auto")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)
+    serve_parser.add_argument("--enable-sessions", action="store_true")
+    serve_parser.add_argument("--max-sessions", type=_positive_int, default=8)
     serve_parser.add_argument("--max-tokens", type=int, default=128)
     serve_parser.add_argument("--prompt-mode", choices=["chat", "raw"], default="chat")
     serve_parser.add_argument(
@@ -422,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
                     default_cache_prefix_mode=args.cache_prefix_mode,
                     token_cache_dir=args.token_cache_dir,
                     max_token_cache_disk_bytes=_mb_to_bytes(args.token_cache_max_disk_mb),
+                    max_sessions=args.max_sessions,
                     mlx_memory_limit_gb=args.mlx_memory_limit_gb,
                     mlx_cache_limit_gb=args.mlx_cache_limit_gb,
                     mlx_wired_limit_gb=args.mlx_wired_limit_gb,

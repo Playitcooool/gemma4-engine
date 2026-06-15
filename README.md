@@ -79,6 +79,30 @@ gemma4 serve --token-cache-max-disk-mb 250
 gemma4 infer --token-cache-dir "" --prompt "Say hi."
 ```
 
+## Sessions
+
+The server can keep an append-only KV cache per local session. This is useful for single-user chat
+or agent loops where each request adds a small follow-up prompt:
+
+```bash
+gemma4 serve --enable-sessions --max-sessions 4
+```
+
+Then send a session id:
+
+```bash
+curl -s http://127.0.0.1:8000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"main","prompt":"Explain KV cache briefly.","max_tokens":64}'
+
+curl -s http://127.0.0.1:8000/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"main","prompt":"Now give one example.","max_tokens":64}'
+```
+
+The second request reuses the session KV cache and only prefills the newly appended prompt. Use
+`"reset_session": true` to clear a specific session before generating.
+
 ## Performance Flags
 
 `--backend auto` and `--backend mlx` both use the MLX runtime.

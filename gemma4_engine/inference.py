@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Literal
 
@@ -46,6 +47,14 @@ class PrefixCacheEntry:
 
 
 @dataclass
+class SessionState:
+    token_ids: list[int]
+    prompt_cache: list[object]
+    generated_token_ids: list[int]
+    last_access_time: float
+
+
+@dataclass
 class GenerationTimings:
     prefill_model_seconds: float = 0.0
     prefill_sync_seconds: float = 0.0
@@ -73,6 +82,7 @@ class Gemma4Engine:
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
     max_token_cache_entries: int = 128
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES
+    max_sessions: int = 8
     mlx_memory_limit_gb: float | None = None
     mlx_cache_limit_gb: float | None = None
     mlx_wired_limit_gb: float | None = None
@@ -87,6 +97,7 @@ class Gemma4Engine:
         self.loaded.warnings.extend(memory_warnings)
         self.argmax_backend, self.backend_status = select_backend(self.backend)
         self._prefix_cache: dict[str, PrefixCacheEntry] = {}
+        self._sessions: OrderedDict[str, SessionState] = OrderedDict()
         self._token_cache = HierarchicalTokenCache(
             disk_dir=self.token_cache_dir,
             max_memory_entries=self.max_token_cache_entries,
@@ -112,6 +123,9 @@ class Gemma4Engine:
         eos_token_id: int | None = None,
         cache_prefix: str | None = None,
         cache_prefix_mode: PromptMode = "raw",
+        session_id: str | None = None,
+        reset_session: bool = False,
+        append_to_session: bool = False,
         _decode_variant: DecodeVariant = "custom",
     ) -> GenerationResult:
         encode_start = now()
@@ -123,6 +137,9 @@ class Gemma4Engine:
         prefix_token_cache_source = None
         prompt_cache = None
         prefill_ids = prompt_ids
+        session_cache_hit = False
+        session_tokens_reused = 0
+        session_state: SessionState | None = None
         prefix_cache_build_seconds = 0.0
         prefix_token_cache_seconds = 0.0
         prefix_kv_cache_lookup_seconds = 0.0
@@ -130,7 +147,22 @@ class Gemma4Engine:
         prefix_timings = GenerationTimings()
         cached_prefix_entry = None
 
-        if cache_prefix:
+        if not hasattr(self, "_sessions"):
+            self._sessions = OrderedDict()
+
+        if session_id and reset_session:
+            self._sessions.pop(session_id, None)
+
+        if session_id and not reset_session:
+            session_state = self._sessions.get(session_id)
+            if session_state is not None:
+                self._sessions.move_to_end(session_id)
+                session_state.last_access_time = now()
+                session_cache_hit = True
+                session_tokens_reused = len(session_state.token_ids)
+                prompt_cache = session_state.prompt_cache
+
+        if cache_prefix and not session_cache_hit:
             prefix_text = _format_prompt(self.loaded.tokenizer, cache_prefix, cache_prefix_mode)
             prefix_token_cache_start = now()
             prefix_token_cache = self._token_cache.get_or_encode(
@@ -173,6 +205,9 @@ class Gemma4Engine:
                 prefix_kv_cache_clone_seconds = now() - clone_start
                 prefill_ids = suffix_ids
                 prefix_tokens = len(prefix_ids)
+
+        if session_id and append_to_session and prompt_cache is None:
+            prompt_cache = _make_prompt_cache(self.loaded.model, max_kv_size=max_kv_size)
 
         eos_ids = set(getattr(self.loaded.tokenizer, "eos_token_ids", []) or [])
         if eos_token_id is None:
@@ -250,8 +285,26 @@ class Gemma4Engine:
             decode_token_latency_p50_seconds=latency_p50,
             decode_token_latency_p95_seconds=latency_p95,
             decode_token_latency_max_seconds=latency_max,
+            session_cache_hit=session_cache_hit,
+            session_tokens_reused=session_tokens_reused,
+            session_count=len(self._sessions),
             **memory_snapshot(),
         )
+        if session_id and append_to_session and prompt_cache is not None:
+            previous_tokens = session_state.token_ids if session_state is not None else []
+            previous_generated = (
+                session_state.generated_token_ids if session_state is not None else []
+            )
+            self._remember_session(
+                session_id,
+                SessionState(
+                    token_ids=[*previous_tokens, *prefill_ids, *generated],
+                    prompt_cache=prompt_cache,
+                    generated_token_ids=[*previous_generated, *generated],
+                    last_access_time=now(),
+                ),
+            )
+            stats.session_count = len(self._sessions)
         return GenerationResult(
             text=_decode(self.loaded.tokenizer, generated),
             token_ids=generated,
@@ -268,6 +321,29 @@ class Gemma4Engine:
 
     def clear_token_memory_cache(self) -> None:
         self._token_cache.clear_memory()
+
+    def clear_sessions(self) -> None:
+        self._sessions.clear()
+
+    def reset_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
+    def list_sessions(self) -> list[dict[str, object]]:
+        return [
+            {
+                "session_id": session_id,
+                "tokens": len(state.token_ids),
+                "generated_tokens": len(state.generated_token_ids),
+                "last_access_time": state.last_access_time,
+            }
+            for session_id, state in self._sessions.items()
+        ]
+
+    def _remember_session(self, session_id: str, state: SessionState) -> None:
+        self._sessions[session_id] = state
+        self._sessions.move_to_end(session_id)
+        while len(self._sessions) > self.max_sessions:
+            self._sessions.popitem(last=False)
 
     def _generate_with_oom_retry(
         self,
@@ -439,6 +515,12 @@ def _clone_cache_state(value: object) -> object:
 
 def _is_mlx_array(value: object) -> bool:
     return type(value).__module__.startswith("mlx.") and hasattr(value, "__copy__")
+
+
+def _make_prompt_cache(model: object, *, max_kv_size: int | None = None) -> list[object]:
+    from mlx_lm.models import cache
+
+    return cache.make_prompt_cache(model, max_kv_size=max_kv_size)
 
 
 def _format_prompt(tokenizer: object, prompt: str, mode: PromptMode) -> str:
@@ -1023,6 +1105,9 @@ def infer(
     eos_token_id: int | None = None,
     cache_prefix: str | None = None,
     cache_prefix_mode: PromptMode = "raw",
+    session_id: str | None = None,
+    reset_session: bool = False,
+    append_to_session: bool = False,
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR,
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES,
     mlx_memory_limit_gb: float | None = None,
@@ -1055,4 +1140,7 @@ def infer(
         eos_token_id=eos_token_id,
         cache_prefix=cache_prefix,
         cache_prefix_mode=cache_prefix_mode,
+        session_id=session_id,
+        reset_session=reset_session,
+        append_to_session=append_to_session,
     )
