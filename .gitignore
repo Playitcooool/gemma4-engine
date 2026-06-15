@@ -5,3 +5,4 @@ __pycache__/
 .ruff_cache/
 .gemma4-cache/
 crates/*/target/
+.DS_Store
