@@ -127,6 +127,8 @@ class Gemma4Engine:
         kv_group_size: int = 64,
         quantized_kv_start: int = 0,
         max_kv_size: int | None = None,
+        max_sliding_kv_size: int | None = None,
+        max_global_kv_size: int | None = None,
         eos_token_id: int | None = None,
         cache_prefix: str | None = None,
         cache_prefix_mode: PromptMode = "raw",
@@ -158,6 +160,13 @@ class Gemma4Engine:
         prefix_kv_cache_clone_seconds = 0.0
         prefix_timings = GenerationTimings()
         cached_prefix_entry = None
+        config_warnings = list(self.loaded.warnings)
+        effective_max_kv_size = _resolve_effective_max_kv_size(
+            max_kv_size=max_kv_size,
+            max_sliding_kv_size=max_sliding_kv_size,
+            max_global_kv_size=max_global_kv_size,
+            warnings=config_warnings,
+        )
 
         if not hasattr(self, "_sessions"):
             self._sessions = OrderedDict()
@@ -205,7 +214,7 @@ class Gemma4Engine:
                 prefill_sync_every=prefill_sync_every,
                 prefill_cache_clear_every=prefill_cache_clear_every,
                 prefill_cache_threshold_gb=prefill_cache_threshold_gb,
-                max_kv_size=max_kv_size,
+                max_kv_size=effective_max_kv_size,
             )
             prefix_kv_cache_lookup_seconds = now() - prefix_lookup_start
             cached = prefix_result.entry
@@ -221,7 +230,10 @@ class Gemma4Engine:
                 prefix_tokens = len(prefix_ids)
         elif not session_cache_hit:
             prefix_lookup_start = now()
-            cached = self._find_longest_prefix_cache(prompt_ids, max_kv_size=max_kv_size)
+            cached = self._find_longest_prefix_cache(
+                prompt_ids,
+                max_kv_size=effective_max_kv_size,
+            )
             prefix_kv_cache_lookup_seconds = now() - prefix_lookup_start
             if cached is not None:
                 clone_start = now()
@@ -233,15 +245,16 @@ class Gemma4Engine:
                 prefix_token_cache_source = "auto-kv"
 
         if session_id and append_to_session and prompt_cache is None:
-            prompt_cache = _make_prompt_cache(self.loaded.model, max_kv_size=max_kv_size)
+            prompt_cache = _make_prompt_cache(
+                self.loaded.model,
+                max_kv_size=effective_max_kv_size,
+            )
 
         eos_ids = set(getattr(self.loaded.tokenizer, "eos_token_ids", []) or [])
         if eos_token_id is None:
             eos_token_id = getattr(self.loaded.tokenizer, "eos_token_id", None)
         if eos_token_id is not None:
             eos_ids.add(int(eos_token_id))
-
-        config_warnings = list(self.loaded.warnings)
 
         generation_prefill_step_size = _prefill_step_size(prefill_step_size, len(prefill_ids))
         decode_variant = _resolve_decode_variant(
@@ -258,7 +271,7 @@ class Gemma4Engine:
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
-                max_kv_size=max_kv_size,
+                max_kv_size=effective_max_kv_size,
                 prompt_cache=prompt_cache,
                 cached_prefix_entry=cached_prefix_entry,
                 decode_variant=decode_variant,
@@ -670,6 +683,34 @@ def _smaller_prefill_step_size(value: int) -> int | None:
     for candidate in (4096, 2048, 1024, 512):
         if value > candidate:
             return candidate
+    return None
+
+
+def _resolve_effective_max_kv_size(
+    *,
+    max_kv_size: int | None,
+    max_sliding_kv_size: int | None,
+    max_global_kv_size: int | None,
+    warnings: list[str],
+) -> int | None:
+    if max_kv_size is not None:
+        if max_sliding_kv_size is not None or max_global_kv_size is not None:
+            warnings.append(
+                "per-layer KV limits ignored because max_kv_size was set explicitly"
+            )
+        return max_kv_size
+    if max_sliding_kv_size is None and max_global_kv_size is None:
+        return None
+    if (
+        max_sliding_kv_size is not None
+        and max_global_kv_size is not None
+        and max_sliding_kv_size == max_global_kv_size
+    ):
+        return max_sliding_kv_size
+    warnings.append(
+        "per-layer KV limits requested, but current MLX cache internals expose only "
+        "a global max_kv_size; no global cap was applied"
+    )
     return None
 
 
@@ -1490,6 +1531,8 @@ def infer(
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
     max_kv_size: int | None = None,
+    max_sliding_kv_size: int | None = None,
+    max_global_kv_size: int | None = None,
     eos_token_id: int | None = None,
     cache_prefix: str | None = None,
     cache_prefix_mode: PromptMode = "raw",
@@ -1533,6 +1576,8 @@ def infer(
         kv_group_size=kv_group_size,
         quantized_kv_start=quantized_kv_start,
         max_kv_size=max_kv_size,
+        max_sliding_kv_size=max_sliding_kv_size,
+        max_global_kv_size=max_global_kv_size,
         eos_token_id=eos_token_id,
         cache_prefix=cache_prefix,
         cache_prefix_mode=cache_prefix_mode,

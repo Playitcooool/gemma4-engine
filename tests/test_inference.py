@@ -22,6 +22,7 @@ from gemma4_engine.inference import (
     _prefill_step_size,
     _quantize_supported_cache_entries,
     _resolve_decode_variant,
+    _resolve_effective_max_kv_size,
     _sync_prompt_cache,
 )
 
@@ -142,6 +143,35 @@ def test_resolve_decode_variant_uses_blockwise_for_non_stream_default() -> None:
         decode_variant="custom_speculative_ngram",
         non_stream_decode_variant="custom_blockwise_16",
     ) == "custom_speculative_ngram"
+
+
+def test_resolve_effective_max_kv_size_handles_per_layer_limits() -> None:
+    warnings: list[str] = []
+    assert _resolve_effective_max_kv_size(
+        max_kv_size=None,
+        max_sliding_kv_size=2048,
+        max_global_kv_size=2048,
+        warnings=warnings,
+    ) == 2048
+    assert warnings == []
+
+    warnings = []
+    assert _resolve_effective_max_kv_size(
+        max_kv_size=None,
+        max_sliding_kv_size=1024,
+        max_global_kv_size=4096,
+        warnings=warnings,
+    ) is None
+    assert "per-layer KV limits requested" in warnings[0]
+
+    warnings = []
+    assert _resolve_effective_max_kv_size(
+        max_kv_size=8192,
+        max_sliding_kv_size=1024,
+        max_global_kv_size=4096,
+        warnings=warnings,
+    ) == 8192
+    assert "max_kv_size was set explicitly" in warnings[0]
 
 
 def test_quantize_supported_cache_entries_skips_unsupported_entries() -> None:
@@ -443,6 +473,8 @@ def test_internal_decode_variant_is_passed_to_greedy_loop(
         prefill_cache_policy="retain",
         prefill_sync_policy="none",
         max_kv_size=4096,
+        max_sliding_kv_size=1024,
+        max_global_kv_size=1024,
         _decode_variant="custom_no_async",
     )
 
@@ -455,6 +487,7 @@ def test_internal_decode_variant_is_passed_to_greedy_loop(
     assert seen["prefill_cache_policy"] == "retain"
     assert seen["prefill_sync_policy"] == "none"
     assert seen["max_kv_size"] == 4096
+    assert "per-layer KV limits ignored" in result.config_warnings[0]
 
 
 def test_gemma4_shared_kv_keeps_requested_kv_bits(

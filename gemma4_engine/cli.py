@@ -252,6 +252,8 @@ def _run_chat(args) -> int:
                 prefill_cache_clear_every=args.prefill_cache_clear_every,
                 prefill_cache_threshold_gb=args.prefill_cache_threshold_gb,
                 max_kv_size=args.max_kv_size,
+                max_sliding_kv_size=args.max_sliding_kv_size,
+                max_global_kv_size=args.max_global_kv_size,
                 session_id=args.session_id,
                 append_to_session=True,
                 speculative_ngram_min=args.speculative_ngram_min,
@@ -311,6 +313,8 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--kv-group-size", type=int, default=64)
     infer_parser.add_argument("--quantized-kv-start", type=int, default=0)
     infer_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    infer_parser.add_argument("--max-sliding-kv-size", type=_positive_int, default=None)
+    infer_parser.add_argument("--max-global-kv-size", type=_positive_int, default=None)
     infer_parser.add_argument(
         "--max-prefix-cache-mb",
         type=_nonnegative_int,
@@ -401,6 +405,8 @@ def build_parser() -> argparse.ArgumentParser:
     bench_parser.add_argument("--kv-group-size", type=int, default=64)
     bench_parser.add_argument("--quantized-kv-start", type=int, default=0)
     bench_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    bench_parser.add_argument("--max-sliding-kv-size", type=_positive_int, default=None)
+    bench_parser.add_argument("--max-global-kv-size", type=_positive_int, default=None)
     bench_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
     bench_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
     bench_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
@@ -451,6 +457,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--kv-group-size", type=int, default=64)
     serve_parser.add_argument("--quantized-kv-start", type=int, default=0)
     serve_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    serve_parser.add_argument("--max-sliding-kv-size", type=_positive_int, default=None)
+    serve_parser.add_argument("--max-global-kv-size", type=_positive_int, default=None)
     serve_parser.add_argument(
         "--max-prefix-cache-mb",
         type=_nonnegative_int,
@@ -519,6 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=None)
     chat_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     chat_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    chat_parser.add_argument("--max-sliding-kv-size", type=_positive_int, default=None)
+    chat_parser.add_argument("--max-global-kv-size", type=_positive_int, default=None)
     chat_parser.add_argument(
         "--max-prefix-cache-mb",
         type=_nonnegative_int,
@@ -571,6 +581,8 @@ def main(argv: list[str] | None = None) -> int:
                 kv_group_size=args.kv_group_size,
                 quantized_kv_start=args.quantized_kv_start,
                 max_kv_size=args.max_kv_size,
+                max_sliding_kv_size=args.max_sliding_kv_size,
+                max_global_kv_size=args.max_global_kv_size,
                 cache_prefix=_read_optional_text(args.cache_prefix, args.cache_prefix_file),
                 cache_prefix_mode=args.cache_prefix_mode,
                 token_cache_dir=args.token_cache_dir,
@@ -654,6 +666,8 @@ def main(argv: list[str] | None = None) -> int:
                     kv_group_size=args.kv_group_size,
                     quantized_kv_start=args.quantized_kv_start,
                     max_kv_size=args.max_kv_size,
+                    max_sliding_kv_size=args.max_sliding_kv_size,
+                    max_global_kv_size=args.max_global_kv_size,
                     speculative_ngram_min=args.speculative_ngram_min,
                     speculative_ngram_max=args.speculative_ngram_max,
                     speculative_draft_tokens=args.speculative_draft_tokens,
@@ -699,6 +713,8 @@ def main(argv: list[str] | None = None) -> int:
                     default_kv_group_size=args.kv_group_size,
                     default_quantized_kv_start=args.quantized_kv_start,
                     default_max_kv_size=args.max_kv_size,
+                    default_max_sliding_kv_size=args.max_sliding_kv_size,
+                    default_max_global_kv_size=args.max_global_kv_size,
                     max_prefix_cache_bytes=_optional_mb_to_bytes(args.max_prefix_cache_mb),
                     default_decode_variant=args.decode_variant,
                     default_stream=args.stream,

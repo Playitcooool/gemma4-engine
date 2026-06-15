@@ -39,6 +39,8 @@ class ServerConfig:
     default_kv_group_size: int = 64
     default_quantized_kv_start: int = 0
     default_max_kv_size: int | None = None
+    default_max_sliding_kv_size: int | None = None
+    default_max_global_kv_size: int | None = None
     default_decode_variant: DecodeVariant = "custom"
     default_stream: bool = True
     default_non_stream_decode_variant: DecodeVariant = "custom_blockwise_16"
@@ -91,6 +93,8 @@ class EngineService:
             "default_prefill_cache_clear_every": self.config.default_prefill_cache_clear_every,
             "default_prefill_cache_threshold_gb": self.config.default_prefill_cache_threshold_gb,
             "default_max_kv_size": self.config.default_max_kv_size,
+            "default_max_sliding_kv_size": self.config.default_max_sliding_kv_size,
+            "default_max_global_kv_size": self.config.default_max_global_kv_size,
             "default_decode_variant": self.config.default_decode_variant,
             "default_stream": self.config.default_stream,
             "default_non_stream_decode_variant": self.config.default_non_stream_decode_variant,
@@ -179,6 +183,22 @@ class EngineService:
             max_kv_size = int(max_kv_size)
             if max_kv_size < 1:
                 raise ValueError("max_kv_size must be >= 1")
+        max_sliding_kv_size = payload.get(
+            "max_sliding_kv_size",
+            self.config.default_max_sliding_kv_size,
+        )
+        if max_sliding_kv_size is not None:
+            max_sliding_kv_size = int(max_sliding_kv_size)
+            if max_sliding_kv_size < 1:
+                raise ValueError("max_sliding_kv_size must be >= 1")
+        max_global_kv_size = payload.get(
+            "max_global_kv_size",
+            self.config.default_max_global_kv_size,
+        )
+        if max_global_kv_size is not None:
+            max_global_kv_size = int(max_global_kv_size)
+            if max_global_kv_size < 1:
+                raise ValueError("max_global_kv_size must be >= 1")
 
         decode_variant = payload.get("decode_variant", self.config.default_decode_variant)
         if decode_variant not in (
@@ -260,6 +280,8 @@ class EngineService:
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,
                 max_kv_size=max_kv_size,
+                max_sliding_kv_size=max_sliding_kv_size,
+                max_global_kv_size=max_global_kv_size,
                 cache_prefix=cache_prefix,
                 cache_prefix_mode=cache_prefix_mode,
                 session_id=session_id,

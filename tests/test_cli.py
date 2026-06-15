@@ -188,6 +188,10 @@ def test_infer_advanced_flags_still_parse() -> None:
             "4",
             "--max-kv-size",
             "4096",
+            "--max-sliding-kv-size",
+            "1024",
+            "--max-global-kv-size",
+            "8192",
             "--max-prefix-cache-mb",
             "256",
             "--decode-variant",
@@ -229,6 +233,8 @@ def test_infer_advanced_flags_still_parse() -> None:
     assert args.prefill_cache_threshold_gb == 12
     assert args.kv_bits == 4
     assert args.max_kv_size == 4096
+    assert args.max_sliding_kv_size == 1024
+    assert args.max_global_kv_size == 8192
     assert args.max_prefix_cache_mb == 256
     assert args.decode_variant == "custom_speculative_ngram"
     assert args.stream is False

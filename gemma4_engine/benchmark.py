@@ -64,6 +64,8 @@ class BenchConfig:
     kv_group_size: int = 64
     quantized_kv_start: int = 0
     max_kv_size: int | None = None
+    max_sliding_kv_size: int | None = None
+    max_global_kv_size: int | None = None
     prefill_cache_policies: tuple[PrefillCachePolicy, ...] = PREFILL_CACHE_POLICIES
     prefill_cache_clear_every: int = 8
     prefill_cache_threshold_gb: float | None = None
@@ -214,6 +216,8 @@ def run_benchmark(
                                 kv_group_size=config.kv_group_size,
                                 quantized_kv_start=config.quantized_kv_start,
                                 max_kv_size=config.max_kv_size,
+                                max_sliding_kv_size=config.max_sliding_kv_size,
+                                max_global_kv_size=config.max_global_kv_size,
                                 cache_prefix=scenario.cache_prefix,
                                 cache_prefix_mode="raw",
                                 session_id=scenario.session_id,
@@ -252,6 +256,8 @@ def run_benchmark(
                                 kv_group_size=config.kv_group_size,
                                 quantized_kv_start=config.quantized_kv_start,
                                 max_kv_size=config.max_kv_size,
+                                max_sliding_kv_size=config.max_sliding_kv_size,
+                                max_global_kv_size=config.max_global_kv_size,
                                 cache_prefix=scenario.cache_prefix,
                                 cache_prefix_mode="raw",
                                 session_id=scenario.session_id,
@@ -313,6 +319,8 @@ def run_benchmark(
         "decode_variants": list(decode_variants),
         "prefill_cache_policies": list(prefill_cache_policies),
         "max_kv_size": config.max_kv_size,
+        "max_sliding_kv_size": config.max_sliding_kv_size,
+        "max_global_kv_size": config.max_global_kv_size,
         "mlx_memory": {
             "memory_limit_gb": config.mlx_memory_limit_gb,
             "cache_limit_gb": config.mlx_cache_limit_gb,
@@ -354,6 +362,8 @@ def _prepare_benchmark_scenario(
             kv_group_size=config.kv_group_size,
             quantized_kv_start=config.quantized_kv_start,
             max_kv_size=config.max_kv_size,
+            max_sliding_kv_size=config.max_sliding_kv_size,
+            max_global_kv_size=config.max_global_kv_size,
             session_id=scenario.session_id,
             reset_session=False,
             append_to_session=True,

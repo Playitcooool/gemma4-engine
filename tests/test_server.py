@@ -80,6 +80,8 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
             "reset_session": False,
             "append_to_session": True,
             "max_kv_size": 4096,
+            "max_sliding_kv_size": 1024,
+            "max_global_kv_size": 8192,
             "decode_variant": "custom_speculative_ngram",
             "stream": False,
             "non_stream_decode_variant": "custom_blockwise_32",
@@ -114,6 +116,8 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
     assert service._seen["reset_session"] is False
     assert service._seen["append_to_session"] is True
     assert service._seen["max_kv_size"] == 4096
+    assert service._seen["max_sliding_kv_size"] == 1024
+    assert service._seen["max_global_kv_size"] == 8192
     assert service._seen["_decode_variant"] == "custom_speculative_ngram"
     assert service._seen["stream"] is False
     assert service._seen["non_stream_decode_variant"] == "custom_blockwise_32"
@@ -136,6 +140,8 @@ def test_health_reports_loaded_backend() -> None:
     assert service.health()["default_prefill_sync_every"] == 4
     assert service.health()["default_prefill_cache_clear_every"] == 8
     assert service.health()["default_prefill_cache_threshold_gb"] is None
+    assert service.health()["default_max_sliding_kv_size"] is None
+    assert service.health()["default_max_global_kv_size"] is None
     assert service.health()["default_decode_variant"] == "custom"
     assert service.health()["default_stream"] is True
     assert service.health()["default_non_stream_decode_variant"] == "custom_blockwise_16"

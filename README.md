@@ -210,3 +210,7 @@ gemma4 serve \
 
 `--kv-bits` quantizes only cache entries that support MLX-LM `to_quantized`; unsupported shared-KV
 entries stay at their original precision instead of disabling quantization for the whole cache.
+
+For safer long-context experiments, `--max-sliding-kv-size` and `--max-global-kv-size` are accepted
+separately. Current MLX cache internals expose only a global `max_kv_size`, so equal per-layer
+values are applied as that global cap; differing values emit a config warning and are left unapplied.
