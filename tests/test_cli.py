@@ -1,5 +1,9 @@
+from types import SimpleNamespace
+
+from gemma4_engine import cli
 from gemma4_engine.cli import build_parser
 from gemma4_engine.constants import DEFAULT_MODEL_PATH
+from gemma4_engine.stats import RunStats
 
 
 def test_default_model_path() -> None:
@@ -48,6 +52,60 @@ def test_serve_simple_defaults() -> None:
     assert args.model == DEFAULT_MODEL_PATH
     assert args.backend == "auto"
     assert args.port == 8000
+
+
+def test_chat_defaults() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["chat"])
+
+    assert args.model == DEFAULT_MODEL_PATH
+    assert args.prefill_cache_policy == "retain"
+    assert args.prefill_sync_policy == "async"
+    assert args.session_id == "chat"
+    assert args.max_sessions == 4
+
+
+def test_chat_loop_uses_session_cache(monkeypatch, capsys) -> None:
+    seen = {}
+
+    class FakeEngine:
+        def __init__(self, **kwargs) -> None:
+            seen["init"] = kwargs
+
+        def reset_session(self, session_id: str) -> None:
+            seen["reset"] = session_id
+
+        def infer(self, prompt: str, **kwargs):
+            seen["prompt"] = prompt
+            seen["infer"] = kwargs
+            return SimpleNamespace(
+                text="ok",
+                stats=RunStats(
+                    model_path="fake",
+                    backend="mlx",
+                    prompt_tokens=2,
+                    generated_tokens=1,
+                    prefill_seconds=0.5,
+                    decode_seconds=0.25,
+                    time_to_first_token_seconds=0.6,
+                    session_cache_hit=True,
+                    session_tokens_reused=3,
+                ),
+            )
+
+    inputs = iter(["hello", "/stats", "/reset", "/exit"])
+    monkeypatch.setattr(cli, "Gemma4Engine", FakeEngine)
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
+    args = build_parser().parse_args(["chat", "--session-id", "main"])
+
+    assert cli._run_chat(args) == 0
+
+    captured = capsys.readouterr()
+    assert "ok" in captured.out
+    assert "session_hit=True" in captured.out
+    assert seen["infer"]["session_id"] == "main"
+    assert seen["infer"]["append_to_session"] is True
+    assert seen["reset"] == "main"
 
 
 def test_infer_advanced_flags_still_parse() -> None:

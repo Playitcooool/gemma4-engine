@@ -55,6 +55,14 @@ Use `--json` when you need the full benchmark payload:
 gemma4 bench --backend mlx --prompt-tokens 128,512 --decode-tokens 64 --warmups 1 --runs 3 --json
 ```
 
+Interactive local chat loads the model once and keeps a session KV cache alive:
+
+```bash
+gemma4 chat --model /path/to/model
+```
+
+Inside chat, use `/reset`, `/stats`, and `/exit`.
+
 ## Prefix Cache
 
 For repeated tasks with the same long document or system prefix:

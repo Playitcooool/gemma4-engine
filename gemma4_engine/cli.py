@@ -13,7 +13,7 @@ from .benchmark import (
     run_benchmark,
 )
 from .constants import DEFAULT_MODEL_PATH
-from .inference import infer
+from .inference import Gemma4Engine, infer
 from .server import ServerConfig, run_server
 from .token_cache import DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES, DEFAULT_TOKEN_CACHE_DIR
 
@@ -113,6 +113,79 @@ def _bench_prefill_cache_policies(value: str) -> tuple[str, ...]:
     if value == "both":
         return ("clear", "retain")
     return (value,)
+
+
+def _print_chat_stats(result) -> None:
+    stats = result.stats
+    print(
+        "stats: "
+        f"prefill={stats.prefill_tokens_per_second:.2f} tok/s, "
+        f"decode={stats.decode_tokens_per_second:.2f} tok/s, "
+        f"ttft={stats.time_to_first_token_seconds:.3f}s, "
+        f"session_hit={stats.session_cache_hit}, "
+        f"session_reused={stats.session_tokens_reused}"
+    )
+
+
+def _run_chat(args) -> int:
+    try:
+        engine = Gemma4Engine(
+            model_path=args.model,
+            backend=args.backend,
+            token_cache_dir=args.token_cache_dir,
+            max_sessions=args.max_sessions,
+            mlx_memory_limit_gb=args.mlx_memory_limit_gb,
+            mlx_cache_limit_gb=args.mlx_cache_limit_gb,
+            mlx_wired_limit_gb=args.mlx_wired_limit_gb,
+        )
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    last_result = None
+    print("gemma4 chat ready. Type /reset, /stats, or /exit.", file=sys.stderr)
+    while True:
+        try:
+            prompt = input("> ")
+        except EOFError:
+            print()
+            return 0
+        prompt = prompt.strip()
+        if not prompt:
+            continue
+        if prompt in {"/exit", "/quit"}:
+            return 0
+        if prompt == "/reset":
+            engine.reset_session(args.session_id)
+            last_result = None
+            print("session reset")
+            continue
+        if prompt == "/stats":
+            if last_result is None:
+                print("stats: no generation yet")
+            else:
+                _print_chat_stats(last_result)
+            continue
+
+        try:
+            last_result = engine.infer(
+                prompt,
+                max_tokens=args.max_tokens,
+                prompt_mode=args.prompt_mode,
+                prefill_step_size=args.prefill_step_size,
+                prefill_cache_policy=args.prefill_cache_policy,
+                prefill_sync_policy=args.prefill_sync_policy,
+                prefill_sync_every=args.prefill_sync_every,
+                prefill_cache_clear_every=args.prefill_cache_clear_every,
+                prefill_cache_threshold_gb=args.prefill_cache_threshold_gb,
+                max_kv_size=args.max_kv_size,
+                session_id=args.session_id,
+                append_to_session=True,
+            )
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print(last_result.text)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -285,6 +358,40 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES // 1_000_000,
         help="maximum token cache disk usage in decimal MB",
     )
+
+    chat_parser = subparsers.add_parser(
+        "chat",
+        description="Interactive single-user chat. Commands: /reset, /stats, /exit",
+    )
+    chat_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
+    chat_parser.add_argument("--backend", choices=["mlx", "auto"], default="auto")
+    chat_parser.add_argument("--max-tokens", type=int, default=128)
+    chat_parser.add_argument("--prompt-mode", choices=["chat", "raw"], default="chat")
+    chat_parser.add_argument(
+        "--prefill-step-size",
+        choices=["auto", "512", "1024", "2048", "4096", "8192"],
+        default="auto",
+    )
+    chat_parser.add_argument(
+        "--prefill-cache-policy",
+        choices=["clear", "retain", "periodic", "threshold"],
+        default="retain",
+    )
+    chat_parser.add_argument(
+        "--prefill-sync-policy",
+        choices=["eval", "async", "none", "periodic"],
+        default="async",
+    )
+    chat_parser.add_argument("--prefill-sync-every", type=_positive_int, default=4)
+    chat_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=8)
+    chat_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
+    chat_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    chat_parser.add_argument("--session-id", default="chat")
+    chat_parser.add_argument("--max-sessions", type=_positive_int, default=4)
+    chat_parser.add_argument("--token-cache-dir", default=DEFAULT_TOKEN_CACHE_DIR, type=_optional_cache_dir)
+    chat_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
+    chat_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
+    chat_parser.add_argument("--mlx-wired-limit-gb", type=_positive_float, default=None)
     return parser
 
 
@@ -400,6 +507,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(benchmark_json(payload) if args.json else benchmark_summary(payload))
         return 0
+
+    if args.command == "chat":
+        return _run_chat(args)
 
     if args.command == "serve":
         try:
