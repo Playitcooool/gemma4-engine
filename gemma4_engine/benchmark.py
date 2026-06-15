@@ -232,6 +232,13 @@ def benchmark_summary(payload: dict[str, object]) -> str:
         total_tps = _float_or_none(median.get("total_tokens_per_second_median"))
         ttft = _float_or_none(median.get("time_to_first_token_seconds_median"))
         peak_memory = _float_or_none(median.get("peak_memory_gb_median"))
+        encode = _float_or_none(median.get("encode_seconds_median"))
+        prefill_model = _float_or_none(median.get("prefill_model_seconds_median"))
+        prefill_sync = _float_or_none(median.get("prefill_sync_seconds_median"))
+        prefill_clear = _float_or_none(median.get("prefill_clear_cache_seconds_median"))
+        decode_sync = _float_or_none(median.get("decode_sync_seconds_median"))
+        decode_item = _float_or_none(median.get("decode_token_item_seconds_median"))
+        decode_p95 = _float_or_none(median.get("decode_token_latency_p95_seconds_median"))
         baseline_prefill_tps = _float_or_none(
             baseline_median.get("prefill_tokens_per_second_median")
         )
@@ -252,6 +259,13 @@ def benchmark_summary(payload: dict[str, object]) -> str:
                 _format_float(total_tps, 1),
                 _format_float(ttft, 3),
                 _format_float(peak_memory, 2),
+                _format_float(encode, 3),
+                _format_float(prefill_model, 3),
+                _format_float(prefill_sync, 3),
+                _format_float(prefill_clear, 3),
+                _format_float(decode_sync, 3),
+                _format_float(decode_item, 3),
+                _format_float(decode_p95, 3),
                 _format_ratio(_ratio(prefill_tps or 0.0, baseline_prefill_tps or 0.0)),
                 _format_ratio(_ratio(decode_tps or 0.0, baseline_decode_tps or 0.0)),
             ]
@@ -275,6 +289,13 @@ def benchmark_summary(payload: dict[str, object]) -> str:
                 "total tok/s",
                 "ttft s",
                 "peak GB",
+                "encode s",
+                "prefill model s",
+                "prefill sync s",
+                "prefill clear s",
+                "decode sync s",
+                "decode item s",
+                "decode p95 s",
                 "prefill x",
                 "decode x",
             ],

@@ -6,7 +6,9 @@ import pytest
 import gemma4_engine.inference as inference
 from gemma4_engine.inference import (
     Gemma4Engine,
+    GenerationTimings,
     PrefixCacheEntry,
+    PrefixCacheBuildResult,
     _clone_prompt_cache,
     _prefix_cache_key,
     _prefill_step_size,
@@ -91,12 +93,17 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
         seen["prefix_prefill_cache_policy"] = prefill_cache_policy
         seen["prefix_prefill_sync_policy"] = prefill_sync_policy
         seen["prefix_max_kv_size"] = max_kv_size
-        return PrefixCacheEntry(token_ids=prefix_ids, cache=[]), True, 0.0
+        return PrefixCacheBuildResult(
+            PrefixCacheEntry(token_ids=prefix_ids, cache=[]),
+            True,
+            0.0,
+            GenerationTimings(),
+        )
 
     def greedy_generate_tokens(**kwargs):
         seen["suffix_ids"] = kwargs["prompt_ids"]
         seen["suffix_prefill_step_size"] = kwargs["prefill_step_size"]
-        return [33], 0.1, 0.2, 0.3
+        return [33], 0.1, 0.2, 0.3, GenerationTimings(decode_token_latencies=[0.2])
 
     monkeypatch.setattr(engine, "_get_or_create_prefix_cache", types.MethodType(
         get_or_create_prefix_cache,
@@ -117,6 +124,11 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
     )
 
     assert result.text == "!"
+    assert result.stats.encode_seconds is not None
+    assert result.stats.prefix_token_cache_seconds is not None
+    assert result.stats.prefix_kv_cache_lookup_seconds is not None
+    assert result.stats.prefix_kv_cache_clone_seconds is not None
+    assert result.stats.decode_token_latency_p50_seconds == 0.2
     assert seen["prefix_ids"] == [97, 98]
     assert seen["prefix_prefill_step_size"] == 2
     assert seen["prefix_prefill_cache_policy"] == "retain"
@@ -157,7 +169,12 @@ def test_internal_decode_variant_is_passed_to_greedy_loop(
         seen["prefill_cache_policy"] = kwargs["prefill_cache_policy"]
         seen["prefill_sync_policy"] = kwargs["prefill_sync_policy"]
         seen["max_kv_size"] = kwargs["max_kv_size"]
-        return [33], 0.1, 0.2, 0.3
+        return [33], 0.1, 0.2, 0.3, GenerationTimings(
+            prefill_model_seconds=0.08,
+            decode_sync_seconds=0.02,
+            decode_token_item_seconds=0.01,
+            decode_token_latencies=[0.2],
+        )
 
     monkeypatch.setattr(inference, "_greedy_generate_tokens", greedy_generate_tokens)
 
@@ -172,6 +189,9 @@ def test_internal_decode_variant_is_passed_to_greedy_loop(
     )
 
     assert result.text == "!"
+    assert result.stats.prefill_model_seconds == 0.08
+    assert result.stats.decode_sync_seconds == 0.02
+    assert result.stats.decode_token_item_seconds == 0.01
     assert seen["decode_variant"] == "custom_no_async"
     assert seen["eos_token_ids"] == {2}
     assert seen["prefill_cache_policy"] == "retain"
@@ -210,13 +230,18 @@ def test_prefix_token_cache_uses_memory_then_disk(
         return engine
 
     def get_or_create_prefix_cache(self, prefix_ids: list[int], **_kwargs):
-        return PrefixCacheEntry(token_ids=prefix_ids, cache=[]), False, 0.0
+        return PrefixCacheBuildResult(
+            PrefixCacheEntry(token_ids=prefix_ids, cache=[]),
+            False,
+            0.0,
+            GenerationTimings(),
+        )
 
     monkeypatch.setattr(Gemma4Engine, "_get_or_create_prefix_cache", get_or_create_prefix_cache)
     monkeypatch.setattr(
         inference,
         "_greedy_generate_tokens",
-        lambda **_kwargs: ([33], 0.1, 0.2, 0.3),
+        lambda **_kwargs: ([33], 0.1, 0.2, 0.3, GenerationTimings()),
     )
 
     first_tokenizer = FakeTokenizer()

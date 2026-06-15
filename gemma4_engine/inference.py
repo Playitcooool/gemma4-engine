@@ -46,6 +46,26 @@ class PrefixCacheEntry:
 
 
 @dataclass
+class GenerationTimings:
+    prefill_model_seconds: float = 0.0
+    prefill_sync_seconds: float = 0.0
+    prefill_clear_cache_seconds: float = 0.0
+    first_token_eval_seconds: float = 0.0
+    decode_model_seconds: float = 0.0
+    decode_sync_seconds: float = 0.0
+    decode_token_item_seconds: float = 0.0
+    decode_token_latencies: list[float] | None = None
+
+
+@dataclass
+class PrefixCacheBuildResult:
+    entry: PrefixCacheEntry | None
+    hit: bool
+    seconds: float
+    timings: GenerationTimings
+
+
+@dataclass
 class Gemma4Engine:
     model_path: str
     backend: BackendName = "auto"
@@ -91,17 +111,24 @@ class Gemma4Engine:
         cache_prefix_mode: PromptMode = "raw",
         _decode_variant: DecodeVariant = "custom",
     ) -> GenerationResult:
+        encode_start = now()
         prompt_text = _format_prompt(self.loaded.tokenizer, prompt, prompt_mode)
         prompt_ids = _encode(self.loaded.tokenizer, prompt_text)
+        encode_seconds = now() - encode_start
         prefix_cache_hit = False
         prefix_tokens = 0
         prefix_token_cache_source = None
         prompt_cache = None
         prefill_ids = prompt_ids
         prefix_cache_build_seconds = 0.0
+        prefix_token_cache_seconds = 0.0
+        prefix_kv_cache_lookup_seconds = 0.0
+        prefix_kv_cache_clone_seconds = 0.0
+        prefix_timings = GenerationTimings()
 
         if cache_prefix:
             prefix_text = _format_prompt(self.loaded.tokenizer, cache_prefix, cache_prefix_mode)
+            prefix_token_cache_start = now()
             prefix_token_cache = self._token_cache.get_or_encode(
                 key=token_cache_key(
                     model_path=self.model_path,
@@ -110,6 +137,7 @@ class Gemma4Engine:
                 ),
                 encode=lambda: _encode(self.loaded.tokenizer, prefix_text),
             )
+            prefix_token_cache_seconds = now() - prefix_token_cache_start
             prefix_ids = prefix_token_cache.token_ids
             prefix_token_cache_source = prefix_token_cache.source
             if prompt_ids[: len(prefix_ids)] == prefix_ids:
@@ -118,17 +146,23 @@ class Gemma4Engine:
                 suffix_ids = prompt_ids
                 prompt_ids = prefix_ids + suffix_ids
 
-            cached, prefix_cache_hit, prefix_cache_build_seconds = (
-                self._get_or_create_prefix_cache(
-                    prefix_ids,
-                    prefill_step_size=_prefill_step_size(prefill_step_size, len(prefix_ids)),
-                    prefill_cache_policy=prefill_cache_policy,
-                    prefill_sync_policy=prefill_sync_policy,
-                    max_kv_size=max_kv_size,
-                )
+            prefix_lookup_start = now()
+            prefix_result = self._get_or_create_prefix_cache(
+                prefix_ids,
+                prefill_step_size=_prefill_step_size(prefill_step_size, len(prefix_ids)),
+                prefill_cache_policy=prefill_cache_policy,
+                prefill_sync_policy=prefill_sync_policy,
+                max_kv_size=max_kv_size,
             )
+            prefix_kv_cache_lookup_seconds = now() - prefix_lookup_start
+            cached = prefix_result.entry
+            prefix_cache_hit = prefix_result.hit
+            prefix_cache_build_seconds = prefix_result.seconds
+            prefix_timings = prefix_result.timings
             if cached is not None:
+                clone_start = now()
                 prompt_cache = _clone_prompt_cache(cached.cache)
+                prefix_kv_cache_clone_seconds = now() - clone_start
                 prefill_ids = suffix_ids
                 prefix_tokens = len(prefix_ids)
 
@@ -147,7 +181,7 @@ class Gemma4Engine:
                     "shared-KV caches are incompatible with quantized KV entries"
                 )
 
-        generated, prefill_seconds, decode_seconds, first_token_seconds = (
+        generated, prefill_seconds, decode_seconds, first_token_seconds, generation_timings = (
             _greedy_generate_tokens(
                 model=self.loaded.model,
                 prompt_ids=prefill_ids,
@@ -165,6 +199,21 @@ class Gemma4Engine:
                 prefill_sync_policy=prefill_sync_policy,
             )
         )
+        prefill_model_seconds = (
+            generation_timings.prefill_model_seconds
+            + prefix_timings.prefill_model_seconds
+        )
+        prefill_sync_seconds = (
+            generation_timings.prefill_sync_seconds
+            + prefix_timings.prefill_sync_seconds
+        )
+        prefill_clear_cache_seconds = (
+            generation_timings.prefill_clear_cache_seconds
+            + prefix_timings.prefill_clear_cache_seconds
+        )
+        latency_p50, latency_p95, latency_max = _decode_latency_stats(
+            generation_timings.decode_token_latencies or []
+        )
 
         stats = RunStats(
             model_path=self.model_path,
@@ -174,6 +223,21 @@ class Gemma4Engine:
             prefill_seconds=prefill_seconds + prefix_cache_build_seconds,
             decode_seconds=decode_seconds,
             time_to_first_token_seconds=first_token_seconds + prefix_cache_build_seconds,
+            encode_seconds=encode_seconds,
+            prefix_token_cache_seconds=prefix_token_cache_seconds,
+            prefix_kv_cache_lookup_seconds=prefix_kv_cache_lookup_seconds,
+            prefix_kv_cache_build_seconds=prefix_cache_build_seconds,
+            prefix_kv_cache_clone_seconds=prefix_kv_cache_clone_seconds,
+            prefill_model_seconds=prefill_model_seconds,
+            prefill_sync_seconds=prefill_sync_seconds,
+            prefill_clear_cache_seconds=prefill_clear_cache_seconds,
+            first_token_eval_seconds=generation_timings.first_token_eval_seconds,
+            decode_model_seconds=generation_timings.decode_model_seconds,
+            decode_sync_seconds=generation_timings.decode_sync_seconds,
+            decode_token_item_seconds=generation_timings.decode_token_item_seconds,
+            decode_token_latency_p50_seconds=latency_p50,
+            decode_token_latency_p95_seconds=latency_p95,
+            decode_token_latency_max_seconds=latency_max,
             **memory_snapshot(),
         )
         return GenerationResult(
@@ -201,14 +265,15 @@ class Gemma4Engine:
         prefill_cache_policy: PrefillCachePolicy = "clear",
         prefill_sync_policy: PrefillSyncPolicy = "eval",
         max_kv_size: int | None = None,
-    ) -> tuple[PrefixCacheEntry | None, bool, float]:
+    ) -> PrefixCacheBuildResult:
+        timings = GenerationTimings()
         if len(prefix_ids) < 2:
-            return None, False, 0.0
+            return PrefixCacheBuildResult(None, False, 0.0, timings)
 
         key = _prefix_cache_key(prefix_ids, max_kv_size=max_kv_size)
         existing = self._prefix_cache.get(key)
         if existing is not None:
-            return existing, True, 0.0
+            return PrefixCacheBuildResult(existing, True, 0.0, timings)
 
         import mlx.core as mx
         from mlx_lm.models import cache
@@ -219,17 +284,23 @@ class Gemma4Engine:
         build_start = now()
         while len(prompt) - processed > 0:
             count = min(prefill_step_size, len(prompt) - processed)
+            model_start = now()
             self.loaded.model(prompt[processed : processed + count][None], cache=prompt_cache)
+            timings.prefill_model_seconds += now() - model_start
+            sync_start = now()
             _sync_prompt_cache(prompt_cache, prefill_sync_policy)
+            timings.prefill_sync_seconds += now() - sync_start
             processed += count
+            clear_start = now()
             _clear_mlx_cache(prefill_cache_policy)
+            timings.prefill_clear_cache_seconds += now() - clear_start
         build_seconds = now() - build_start
 
         entry = PrefixCacheEntry(token_ids=list(prefix_ids), cache=_clone_prompt_cache(prompt_cache))
         if len(self._prefix_cache) >= self.max_prefix_cache_entries:
             self._prefix_cache.pop(next(iter(self._prefix_cache)))
         self._prefix_cache[key] = entry
-        return entry, False, build_seconds
+        return PrefixCacheBuildResult(entry, False, build_seconds, timings)
 
 
 def _prefix_cache_key(token_ids: list[int], *, max_kv_size: int | None = None) -> str:
@@ -307,6 +378,27 @@ def _prefill_step_size(value: PrefillStepSize, prompt_tokens: int) -> int:
     if value == "auto":
         return 512
     return int(value)
+
+
+def _decode_latency_stats(latencies: list[float]) -> tuple[float | None, float | None, float | None]:
+    if not latencies:
+        return None, None, None
+    sorted_latencies = sorted(latencies)
+    return (
+        _percentile(sorted_latencies, 0.50),
+        _percentile(sorted_latencies, 0.95),
+        max(sorted_latencies),
+    )
+
+
+def _percentile(sorted_values: list[float], percentile: float) -> float:
+    if len(sorted_values) == 1:
+        return sorted_values[0]
+    index = min(
+        len(sorted_values) - 1,
+        max(0, round((len(sorted_values) - 1) * percentile)),
+    )
+    return sorted_values[index]
 
 
 def _clear_mlx_cache(policy: PrefillCachePolicy) -> None:
@@ -390,7 +482,7 @@ def _greedy_generate_tokens(
     decode_variant: DecodeVariant = "custom",
     prefill_cache_policy: PrefillCachePolicy = "clear",
     prefill_sync_policy: PrefillSyncPolicy = "eval",
-) -> tuple[list[int], float, float, float]:
+) -> tuple[list[int], float, float, float, GenerationTimings]:
     if backend.name == "mlx":
         return _greedy_generate_tokens_mlx(
             model=model,
@@ -417,17 +509,28 @@ def _greedy_generate_tokens(
     prompt_cache = prompt_cache or cache.make_prompt_cache(model, max_kv_size=max_kv_size)
     processed = 0
 
+    timings = GenerationTimings(decode_token_latencies=[])
     prefill_start = now()
     while len(prompt) - processed > 1:
         remaining = (len(prompt) - processed) - 1
         count = min(prefill_step_size, remaining)
+        model_start = now()
         model(prompt[processed : processed + count][None], cache=prompt_cache)
+        timings.prefill_model_seconds += now() - model_start
+        sync_start = now()
         _sync_prompt_cache(prompt_cache, prefill_sync_policy)
+        timings.prefill_sync_seconds += now() - sync_start
         processed += count
+        clear_start = now()
         _clear_mlx_cache(prefill_cache_policy)
+        timings.prefill_clear_cache_seconds += now() - clear_start
 
+    model_start = now()
     logits = model(prompt[processed:][None], cache=prompt_cache)[:, -1, :]
+    timings.prefill_model_seconds += now() - model_start
+    sync_start = now()
     mx.eval(logits)
+    timings.prefill_sync_seconds += now() - sync_start
     prefill_seconds = now() - prefill_start
 
     generated: list[int] = []
@@ -436,17 +539,25 @@ def _greedy_generate_tokens(
     next_logits = logits
 
     for index in range(max_tokens):
+        token_start = now()
         next_token = backend.argmax(next_logits[0])
         if index == 0:
             first_token_seconds = now() - prefill_start
+            timings.first_token_eval_seconds = now() - token_start
         if next_token in eos_token_ids:
+            timings.decode_token_latencies.append(now() - token_start)
             break
         generated.append(next_token)
+        model_start = now()
         next_logits = model(mx.array([[next_token]]), cache=prompt_cache)[:, -1, :]
+        timings.decode_model_seconds += now() - model_start
+        sync_start = now()
         mx.eval(next_logits)
+        timings.decode_sync_seconds += now() - sync_start
+        timings.decode_token_latencies.append(now() - token_start)
 
     decode_seconds = now() - decode_start
-    return generated, prefill_seconds, decode_seconds, first_token_seconds
+    return generated, prefill_seconds, decode_seconds, first_token_seconds, timings
 
 
 def _greedy_generate_tokens_mlx(
@@ -464,7 +575,7 @@ def _greedy_generate_tokens_mlx(
     decode_variant: DecodeVariant = "custom",
     prefill_cache_policy: PrefillCachePolicy = "clear",
     prefill_sync_policy: PrefillSyncPolicy = "eval",
-) -> tuple[list[int], float, float, float]:
+) -> tuple[list[int], float, float, float, GenerationTimings]:
     if decode_variant == "mlx_lm_generate_step":
         return _greedy_generate_tokens_mlx_generate_step(
             model=model,
@@ -493,6 +604,7 @@ def _greedy_generate_tokens_mlx(
     prompt = mx.array(prompt_ids)
     prompt_cache = prompt_cache or cache.make_prompt_cache(model, max_kv_size=max_kv_size)
     processed = 0
+    timings = GenerationTimings(decode_token_latencies=[])
 
     def quantize_supported_cache_entries() -> None:
         if kv_bits is None:
@@ -522,15 +634,26 @@ def _greedy_generate_tokens_mlx(
             while len(prompt) - processed > 1:
                 remaining = (len(prompt) - processed) - 1
                 count = min(prefill_step_size, remaining)
+                model_start = now()
                 model_call(prompt[processed : processed + count])
+                timings.prefill_model_seconds += now() - model_start
+                sync_start = now()
                 _sync_prompt_cache(prompt_cache, prefill_sync_policy)
+                timings.prefill_sync_seconds += now() - sync_start
                 processed += count
+                clear_start = now()
                 _clear_mlx_cache(prefill_cache_policy)
+                timings.prefill_clear_cache_seconds += now() - clear_start
 
+            first_token_start = now()
             token = step(prompt[processed:])
+            timings.prefill_model_seconds += now() - first_token_start
             quantize_supported_cache_entries()
+            sync_start = now()
             mx.async_eval(token)
             mx.eval(token)
+            timings.prefill_sync_seconds += now() - sync_start
+            timings.first_token_eval_seconds = now() - first_token_start
 
         prefill_seconds = now() - prefill_start
         if decode_variant == "custom_defer_ids":
@@ -540,52 +663,81 @@ def _greedy_generate_tokens_mlx(
             for index in range(max_tokens):
                 token_arrays.append(token)
                 if index + 1 < max_tokens:
+                    model_start = now()
                     token = step(token)
+                    timings.decode_model_seconds += now() - model_start
+                    sync_start = now()
                     mx.async_eval(token)
+                    timings.decode_sync_seconds += now() - sync_start
 
             if token_arrays:
+                sync_start = now()
                 tokens = mx.concatenate(token_arrays, axis=0)
                 mx.eval(tokens)
+                timings.decode_sync_seconds += now() - sync_start
+                item_start = now()
                 token_ids = [int(token_id) for token_id in tokens.tolist()]
+                timings.decode_token_item_seconds += now() - item_start
                 for token_id in token_ids:
                     if token_id in eos_token_ids:
                         break
                     generated.append(token_id)
             decode_seconds = now() - decode_start
             first_token_seconds = prefill_seconds + decode_seconds
-            return generated, prefill_seconds, decode_seconds, first_token_seconds
+            if generated:
+                per_token = decode_seconds / len(generated)
+                timings.decode_token_latencies.extend([per_token] * len(generated))
+            return generated, prefill_seconds, decode_seconds, first_token_seconds, timings
 
         generated: list[int] = []
         decode_start = now()
         first_token_seconds = 0.0
 
         for index in range(max_tokens):
+            token_start = now()
             next_token = None
             if decode_variant != "custom_no_async" and index + 1 < max_tokens:
+                model_start = now()
                 next_token = step(token)
+                timings.decode_model_seconds += now() - model_start
+                sync_start = now()
                 mx.async_eval(next_token)
+                timings.decode_sync_seconds += now() - sync_start
 
+            sync_start = now()
             mx.eval(token)
+            timings.decode_sync_seconds += now() - sync_start
+            item_start = now()
             token_id = int(token.item())
+            timings.decode_token_item_seconds += now() - item_start
             if index == 0:
                 first_token_seconds = prefill_seconds + (now() - decode_start)
             if token_id in eos_token_ids:
+                timings.decode_token_latencies.append(now() - token_start)
                 break
 
             generated.append(token_id)
             if next_token is None:
                 if decode_variant == "custom_no_async" and index + 1 < max_tokens:
+                    model_start = now()
                     token = step(token)
+                    timings.decode_model_seconds += now() - model_start
+                    sync_start = now()
                     mx.eval(token)
+                    timings.decode_sync_seconds += now() - sync_start
+                    timings.decode_token_latencies.append(now() - token_start)
                     continue
                 break
             if decode_variant == "custom_eval_next":
+                sync_start = now()
                 mx.eval(next_token)
+                timings.decode_sync_seconds += now() - sync_start
             token = next_token
+            timings.decode_token_latencies.append(now() - token_start)
 
         decode_seconds = now() - decode_start
 
-    return generated, prefill_seconds, decode_seconds, first_token_seconds
+    return generated, prefill_seconds, decode_seconds, first_token_seconds, timings
 
 
 def _greedy_generate_tokens_mlx_generate_step(
@@ -600,13 +752,14 @@ def _greedy_generate_tokens_mlx_generate_step(
     quantized_kv_start: int = 0,
     max_kv_size: int | None = None,
     prompt_cache: list[object] | None = None,
-) -> tuple[list[int], float, float, float]:
+) -> tuple[list[int], float, float, float, GenerationTimings]:
     import mlx.core as mx
     from mlx_lm.generate import generate_step
 
     prompt = mx.array(prompt_ids)
     prefill_start = now()
     prefill_seconds: float | None = None
+    timings = GenerationTimings(decode_token_latencies=[])
 
     def prompt_progress(processed: int, total: int) -> None:
         nonlocal prefill_seconds
@@ -630,20 +783,27 @@ def _greedy_generate_tokens_mlx_generate_step(
     decode_start: float | None = None
     first_token_seconds = 0.0
     for token_id, _logprobs in generator:
+        token_start = now()
         if prefill_seconds is None:
             prefill_seconds = now() - prefill_start
         if decode_start is None:
             decode_start = now()
             first_token_seconds = prefill_seconds
+            timings.first_token_eval_seconds = 0.0
+        item_start = now()
         token_id = int(token_id)
+        timings.decode_token_item_seconds += now() - item_start
         if token_id in eos_token_ids:
+            timings.decode_token_latencies.append(now() - token_start)
             break
         generated.append(token_id)
+        timings.decode_token_latencies.append(now() - token_start)
 
     if prefill_seconds is None:
         prefill_seconds = now() - prefill_start
+    timings.prefill_model_seconds = prefill_seconds
     decode_seconds = now() - decode_start if decode_start is not None else 0.0
-    return generated, prefill_seconds, decode_seconds, first_token_seconds
+    return generated, prefill_seconds, decode_seconds, first_token_seconds, timings
 
 
 def infer(

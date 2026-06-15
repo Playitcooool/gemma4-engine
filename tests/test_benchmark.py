@@ -69,6 +69,10 @@ def test_benchmark_reports_cases_and_summary(monkeypatch) -> None:
     assert "Benchmark summary for fake (backend=mlx)" in summary
     assert "prefill tok/s" in summary
     assert "decode tok/s" in summary
+    assert "prefill model s" in summary
+    assert "prefill sync s" in summary
+    assert "decode sync s" in summary
+    assert "decode p95 s" in summary
     assert "custom_no_async" in summary
     assert "2.000x" in summary
 

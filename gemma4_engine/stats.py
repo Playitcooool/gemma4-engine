@@ -19,6 +19,21 @@ class RunStats:
     peak_memory_gb: float | None = None
     active_memory_gb: float | None = None
     cache_memory_gb: float | None = None
+    encode_seconds: float | None = None
+    prefix_token_cache_seconds: float | None = None
+    prefix_kv_cache_lookup_seconds: float | None = None
+    prefix_kv_cache_build_seconds: float | None = None
+    prefix_kv_cache_clone_seconds: float | None = None
+    prefill_model_seconds: float | None = None
+    prefill_sync_seconds: float | None = None
+    prefill_clear_cache_seconds: float | None = None
+    first_token_eval_seconds: float | None = None
+    decode_model_seconds: float | None = None
+    decode_sync_seconds: float | None = None
+    decode_token_item_seconds: float | None = None
+    decode_token_latency_p50_seconds: float | None = None
+    decode_token_latency_p95_seconds: float | None = None
+    decode_token_latency_max_seconds: float | None = None
 
     @property
     def prefill_tokens_per_second(self) -> float:
@@ -85,7 +100,27 @@ def median_stats(stats: Iterable[RunStats]) -> dict[str, float | None]:
             row.time_to_first_token_seconds for row in rows
         ),
     }
-    for field in ("peak_memory_gb", "active_memory_gb", "cache_memory_gb"):
+    optional_fields = (
+        "peak_memory_gb",
+        "active_memory_gb",
+        "cache_memory_gb",
+        "encode_seconds",
+        "prefix_token_cache_seconds",
+        "prefix_kv_cache_lookup_seconds",
+        "prefix_kv_cache_build_seconds",
+        "prefix_kv_cache_clone_seconds",
+        "prefill_model_seconds",
+        "prefill_sync_seconds",
+        "prefill_clear_cache_seconds",
+        "first_token_eval_seconds",
+        "decode_model_seconds",
+        "decode_sync_seconds",
+        "decode_token_item_seconds",
+        "decode_token_latency_p50_seconds",
+        "decode_token_latency_p95_seconds",
+        "decode_token_latency_max_seconds",
+    )
+    for field in optional_fields:
         values = [getattr(row, field) for row in rows if getattr(row, field) is not None]
         payload[f"{field}_median"] = median(values) if values else None
     return payload
