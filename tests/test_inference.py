@@ -18,6 +18,7 @@ from gemma4_engine.inference import (
     _ngram_draft,
     _build_ngram_follow_map,
     _prefix_cache_key,
+    _prefix_cache_entry_bytes,
     _prefill_step_size,
     _resolve_decode_variant,
     _sync_prompt_cache,
@@ -194,6 +195,39 @@ def test_prefix_cache_key_depends_on_token_sequence() -> None:
     assert _prefix_cache_key([1, 23]) == _prefix_cache_key([1, 23])
     assert _prefix_cache_key([1, 23]) != _prefix_cache_key([12, 3])
     assert _prefix_cache_key([1, 23]) != _prefix_cache_key([1, 23], max_kv_size=4096)
+
+
+def test_prefix_cache_byte_estimate_includes_nested_arrays() -> None:
+    class FakeArray:
+        nbytes = 16
+
+        def __copy__(self):
+            return FakeArray()
+
+    FakeArray.__module__ = "mlx.core"
+
+    entry = PrefixCacheEntry(
+        token_ids=[1, 2, 3],
+        cache=[SimpleNamespace(state=[FakeArray()], meta_state={"extra": FakeArray()})],
+    )
+
+    assert _prefix_cache_entry_bytes(entry) == 44
+
+
+def test_prefix_cache_prunes_lru_by_byte_limit() -> None:
+    engine = object.__new__(Gemma4Engine)
+    engine.max_prefix_cache_entries = 8
+    engine.max_prefix_cache_bytes = 15
+    engine._prefix_cache = OrderedDict(
+        [
+            ("old", PrefixCacheEntry(token_ids=[1, 2, 3], cache=[])),
+            ("new", PrefixCacheEntry(token_ids=[4], cache=[])),
+        ]
+    )
+
+    engine._prune_prefix_cache()
+
+    assert list(engine._prefix_cache) == ["new"]
 
 
 def test_clone_prompt_cache_clones_nested_mlx_arrays() -> None:

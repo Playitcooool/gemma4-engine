@@ -96,6 +96,12 @@ gemma4 serve --token-cache-max-disk-mb 250
 gemma4 infer --token-cache-dir "" --prompt "Say hi."
 ```
 
+The live prefix KV cache is also LRU-managed. Limit its estimated MLX tensor footprint with:
+
+```bash
+gemma4 serve --max-prefix-cache-mb 1024
+```
+
 ## Sessions
 
 The server can keep an append-only KV cache per local session. This is useful for single-user chat

@@ -85,6 +85,7 @@ class Gemma4Engine:
     model_path: str
     backend: BackendName = "auto"
     max_prefix_cache_entries: int = 4
+    max_prefix_cache_bytes: int | None = None
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
     max_token_cache_entries: int = 128
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES
@@ -533,11 +534,22 @@ class Gemma4Engine:
         build_seconds = now() - build_start
 
         entry = PrefixCacheEntry(token_ids=list(prefix_ids), cache=_clone_prompt_cache(prompt_cache))
-        if len(self._prefix_cache) >= self.max_prefix_cache_entries:
-            self._prefix_cache.popitem(last=False)
         self._prefix_cache[key] = entry
         self._prefix_cache.move_to_end(key)
+        self._prune_prefix_cache()
         return PrefixCacheBuildResult(entry, False, build_seconds, timings)
+
+    def _prune_prefix_cache(self) -> None:
+        while len(self._prefix_cache) > self.max_prefix_cache_entries:
+            self._prefix_cache.popitem(last=False)
+        if self.max_prefix_cache_bytes is None:
+            return
+        while (
+            self._prefix_cache
+            and _prefix_cache_total_bytes(self._prefix_cache.values())
+            > self.max_prefix_cache_bytes
+        ):
+            self._prefix_cache.popitem(last=False)
 
 
 def _prefix_cache_key(token_ids: list[int], *, max_kv_size: int | None = None) -> str:
@@ -584,6 +596,38 @@ def _clone_cache_state(value: object) -> object:
 
 def _is_mlx_array(value: object) -> bool:
     return type(value).__module__.startswith("mlx.") and hasattr(value, "__copy__")
+
+
+def _prefix_cache_total_bytes(entries) -> int:
+    return sum(_prefix_cache_entry_bytes(entry) for entry in entries)
+
+
+def _prefix_cache_entry_bytes(entry: PrefixCacheEntry) -> int:
+    return len(entry.token_ids) * 4 + _cache_state_nbytes(entry.cache)
+
+
+def _cache_state_nbytes(value: object) -> int:
+    if _is_mlx_array(value):
+        nbytes = getattr(value, "nbytes", None)
+        if isinstance(nbytes, int):
+            return nbytes
+        size = getattr(value, "size", None)
+        itemsize = getattr(value, "itemsize", None)
+        if isinstance(size, int) and isinstance(itemsize, int):
+            return size * itemsize
+        return 0
+    if isinstance(value, dict):
+        return sum(
+            _cache_state_nbytes(key) + _cache_state_nbytes(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return sum(_cache_state_nbytes(item) for item in value)
+    if hasattr(value, "state") or hasattr(value, "meta_state"):
+        return _cache_state_nbytes(getattr(value, "state", None)) + _cache_state_nbytes(
+            getattr(value, "meta_state", None)
+        )
+    return 0
 
 
 def _make_prompt_cache(model: object, *, max_kv_size: int | None = None) -> list[object]:
@@ -1446,6 +1490,7 @@ def infer(
     append_to_session: bool = False,
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR,
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES,
+    max_prefix_cache_bytes: int | None = None,
     speculative_ngram_min: int = 3,
     speculative_ngram_max: int = 6,
     speculative_draft_tokens: int = 4,
@@ -1461,6 +1506,7 @@ def infer(
         backend=backend,
         token_cache_dir=token_cache_dir,
         max_token_cache_disk_bytes=max_token_cache_disk_bytes,
+        max_prefix_cache_bytes=max_prefix_cache_bytes,
         mlx_memory_limit_gb=mlx_memory_limit_gb,
         mlx_cache_limit_gb=mlx_cache_limit_gb,
         mlx_wired_limit_gb=mlx_wired_limit_gb,

@@ -188,6 +188,8 @@ def test_infer_advanced_flags_still_parse() -> None:
             "4",
             "--max-kv-size",
             "4096",
+            "--max-prefix-cache-mb",
+            "256",
             "--decode-variant",
             "custom_speculative_ngram",
             "--no-stream",
@@ -227,6 +229,7 @@ def test_infer_advanced_flags_still_parse() -> None:
     assert args.prefill_cache_threshold_gb == 12
     assert args.kv_bits == 4
     assert args.max_kv_size == 4096
+    assert args.max_prefix_cache_mb == 256
     assert args.decode_variant == "custom_speculative_ngram"
     assert args.stream is False
     assert args.non_stream_decode_variant == "custom_blockwise_32"
@@ -265,6 +268,8 @@ def test_serve_token_cache_max_disk_mb_parses() -> None:
             "serve",
             "--token-cache-max-disk-mb",
             "250",
+            "--max-prefix-cache-mb",
+            "128",
             "--enable-sessions",
             "--max-sessions",
             "4",
@@ -273,5 +278,6 @@ def test_serve_token_cache_max_disk_mb_parses() -> None:
     cli._resolve_profile_defaults(args)
 
     assert args.token_cache_max_disk_mb == 250
+    assert args.max_prefix_cache_mb == 128
     assert args.enable_sessions is True
     assert args.max_sessions == 4

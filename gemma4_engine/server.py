@@ -49,6 +49,7 @@ class ServerConfig:
     default_cache_prefix_mode: PromptMode = "raw"
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES
+    max_prefix_cache_bytes: int | None = None
     max_sessions: int = 8
     mlx_memory_limit_gb: float | None = None
     mlx_cache_limit_gb: float | None = None
@@ -61,6 +62,7 @@ class EngineService:
         self.engine = Gemma4Engine(
             model_path=config.model_path,
             backend=config.backend,
+            max_prefix_cache_bytes=config.max_prefix_cache_bytes,
             token_cache_dir=config.token_cache_dir,
             max_token_cache_disk_bytes=config.max_token_cache_disk_bytes,
             max_sessions=config.max_sessions,
@@ -80,6 +82,7 @@ class EngineService:
             "config_warnings": self.engine.loaded.warnings,
             "token_cache_dir": self.config.token_cache_dir,
             "max_token_cache_disk_bytes": self.config.max_token_cache_disk_bytes,
+            "max_prefix_cache_bytes": self.config.max_prefix_cache_bytes,
             "max_sessions": self.config.max_sessions,
             "sessions": self.engine.list_sessions(),
             "default_prefill_cache_policy": self.config.default_prefill_cache_policy,

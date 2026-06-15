@@ -150,6 +150,10 @@ def _mb_to_bytes(value: int) -> int:
     return value * 1_000_000
 
 
+def _optional_mb_to_bytes(value: int) -> int | None:
+    return None if value == 0 else _mb_to_bytes(value)
+
+
 def _bench_prefill_cache_policies(value: str) -> tuple[str, ...]:
     if value == "both":
         return ("clear", "retain")
@@ -200,6 +204,7 @@ def _run_chat(args) -> int:
         engine = Gemma4Engine(
             model_path=args.model,
             backend=args.backend,
+            max_prefix_cache_bytes=_optional_mb_to_bytes(args.max_prefix_cache_mb),
             token_cache_dir=args.token_cache_dir,
             max_sessions=args.max_sessions,
             mlx_memory_limit_gb=args.mlx_memory_limit_gb,
@@ -306,6 +311,12 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--kv-group-size", type=int, default=64)
     infer_parser.add_argument("--quantized-kv-start", type=int, default=0)
     infer_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    infer_parser.add_argument(
+        "--max-prefix-cache-mb",
+        type=_nonnegative_int,
+        default=0,
+        help="maximum in-process prefix KV cache size in decimal MB; 0 disables byte pruning",
+    )
     infer_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default=None)
     infer_parser.add_argument(
         "--stream",
@@ -440,6 +451,12 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--kv-group-size", type=int, default=64)
     serve_parser.add_argument("--quantized-kv-start", type=int, default=0)
     serve_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    serve_parser.add_argument(
+        "--max-prefix-cache-mb",
+        type=_nonnegative_int,
+        default=0,
+        help="maximum in-process prefix KV cache size in decimal MB; 0 disables byte pruning",
+    )
     serve_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default=None)
     serve_parser.add_argument(
         "--stream",
@@ -502,6 +519,12 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=None)
     chat_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     chat_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
+    chat_parser.add_argument(
+        "--max-prefix-cache-mb",
+        type=_nonnegative_int,
+        default=0,
+        help="maximum in-process prefix KV cache size in decimal MB; 0 disables byte pruning",
+    )
     chat_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default=None)
     chat_parser.add_argument(
         "--stream",
@@ -552,6 +575,7 @@ def main(argv: list[str] | None = None) -> int:
                 cache_prefix_mode=args.cache_prefix_mode,
                 token_cache_dir=args.token_cache_dir,
                 max_token_cache_disk_bytes=_mb_to_bytes(args.token_cache_max_disk_mb),
+                max_prefix_cache_bytes=_optional_mb_to_bytes(args.max_prefix_cache_mb),
                 speculative_ngram_min=args.speculative_ngram_min,
                 speculative_ngram_max=args.speculative_ngram_max,
                 speculative_draft_tokens=args.speculative_draft_tokens,
@@ -675,6 +699,7 @@ def main(argv: list[str] | None = None) -> int:
                     default_kv_group_size=args.kv_group_size,
                     default_quantized_kv_start=args.quantized_kv_start,
                     default_max_kv_size=args.max_kv_size,
+                    max_prefix_cache_bytes=_optional_mb_to_bytes(args.max_prefix_cache_mb),
                     default_decode_variant=args.decode_variant,
                     default_stream=args.stream,
                     default_non_stream_decode_variant=args.non_stream_decode_variant,
