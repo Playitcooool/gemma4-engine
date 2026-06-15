@@ -24,6 +24,9 @@ DecodeVariant = Literal[
     "custom_no_async",
     "custom_eval_next",
     "custom_defer_ids",
+    "custom_blockwise_8",
+    "custom_blockwise_16",
+    "custom_blockwise_32",
     "mlx_lm_generate_step",
 ]
 
@@ -897,6 +900,9 @@ def _greedy_generate_tokens_mlx(
         "custom_no_async",
         "custom_eval_next",
         "custom_defer_ids",
+        "custom_blockwise_8",
+        "custom_blockwise_16",
+        "custom_blockwise_32",
     }:
         raise ValueError(f"unknown decode variant: {decode_variant}")
 
@@ -973,6 +979,19 @@ def _greedy_generate_tokens_mlx(
             timings.first_token_eval_seconds = now() - first_token_start
 
         prefill_seconds = now() - prefill_start
+        block_size = _blockwise_decode_size(decode_variant)
+        if block_size is not None:
+            return _decode_blockwise_mlx(
+                step=step,
+                token=token,
+                max_tokens=max_tokens,
+                block_size=block_size,
+                eos_token_ids=eos_token_ids,
+                prefill_seconds=prefill_seconds,
+                timings=timings,
+                mx=mx,
+            )
+
         if decode_variant == "custom_defer_ids":
             generated: list[int] = []
             decode_start = now()
@@ -1054,6 +1073,80 @@ def _greedy_generate_tokens_mlx(
 
         decode_seconds = now() - decode_start
 
+    return generated, prefill_seconds, decode_seconds, first_token_seconds, timings
+
+
+def _blockwise_decode_size(decode_variant: DecodeVariant) -> int | None:
+    if decode_variant == "custom_blockwise_8":
+        return 8
+    if decode_variant == "custom_blockwise_16":
+        return 16
+    if decode_variant == "custom_blockwise_32":
+        return 32
+    return None
+
+
+def _decode_blockwise_mlx(
+    *,
+    step,
+    token: object,
+    max_tokens: int,
+    block_size: int,
+    eos_token_ids: set[int],
+    prefill_seconds: float,
+    timings: GenerationTimings,
+    mx,
+) -> tuple[list[int], float, float, float, GenerationTimings]:
+    generated: list[int] = []
+    decode_start = now()
+    first_token_seconds = 0.0
+
+    while len(generated) < max_tokens:
+        block_start = now()
+        block_limit = min(block_size, max_tokens - len(generated))
+        token_arrays = []
+        for index in range(block_limit):
+            token_arrays.append(token)
+            if index + 1 < block_limit:
+                model_start = now()
+                token = step(token)
+                timings.decode_model_seconds += now() - model_start
+                sync_start = now()
+                mx.async_eval(token)
+                timings.decode_sync_seconds += now() - sync_start
+
+        sync_start = now()
+        tokens = mx.concatenate(token_arrays, axis=0)
+        mx.eval(tokens)
+        timings.decode_sync_seconds += now() - sync_start
+        if first_token_seconds == 0.0:
+            first_token_seconds = prefill_seconds + (now() - decode_start)
+
+        item_start = now()
+        token_ids = [int(token_id) for token_id in tokens.tolist()]
+        timings.decode_token_item_seconds += now() - item_start
+        block_seconds = now() - block_start
+        per_token_latency = block_seconds / max(1, len(token_ids))
+        for token_id in token_ids:
+            timings.decode_token_latencies.append(per_token_latency)
+            if token_id in eos_token_ids:
+                decode_seconds = now() - decode_start
+                return generated, prefill_seconds, decode_seconds, first_token_seconds, timings
+            generated.append(token_id)
+            if len(generated) >= max_tokens:
+                break
+
+        if len(generated) >= max_tokens:
+            break
+
+        model_start = now()
+        token = step(token)
+        timings.decode_model_seconds += now() - model_start
+        sync_start = now()
+        mx.async_eval(token)
+        timings.decode_sync_seconds += now() - sync_start
+
+    decode_seconds = now() - decode_start
     return generated, prefill_seconds, decode_seconds, first_token_seconds, timings
 
 

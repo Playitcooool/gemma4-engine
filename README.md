@@ -131,6 +131,12 @@ gemma4 bench \
   --prefill-sync-policies eval,async,none \
   --prefill-cache-policy clear \
   --decode-variants custom
+
+gemma4 bench \
+  --backend mlx \
+  --prompt-tokens 512 \
+  --decode-tokens 128 \
+  --decode-variants custom,custom_blockwise_8,custom_blockwise_16,custom_blockwise_32
 ```
 
 `--prefill-cache-policy retain` keeps the MLX allocator cache between prefill chunks. It can improve

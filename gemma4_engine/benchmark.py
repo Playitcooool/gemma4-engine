@@ -29,6 +29,9 @@ DECODE_BENCHMARK_VARIANTS: tuple[DecodeVariant, ...] = (
     "custom_no_async",
     "custom_eval_next",
     "custom_defer_ids",
+    "custom_blockwise_8",
+    "custom_blockwise_16",
+    "custom_blockwise_32",
     "mlx_lm_generate_step",
 )
 

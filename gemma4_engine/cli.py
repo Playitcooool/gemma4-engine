@@ -54,6 +54,9 @@ def _csv_decode_variants(value: str) -> tuple[str, ...]:
         "custom_no_async",
         "custom_eval_next",
         "custom_defer_ids",
+        "custom_blockwise_8",
+        "custom_blockwise_16",
+        "custom_blockwise_32",
         "mlx_lm_generate_step",
     }
     values = tuple(part.strip() for part in value.split(",") if part.strip())
@@ -62,6 +65,7 @@ def _csv_decode_variants(value: str) -> tuple[str, ...]:
         raise argparse.ArgumentTypeError(
             "decode variants must be one or more of: "
             "custom, custom_no_async, custom_eval_next, custom_defer_ids, "
+            "custom_blockwise_8, custom_blockwise_16, custom_blockwise_32, "
             "mlx_lm_generate_step"
         )
     if not values:

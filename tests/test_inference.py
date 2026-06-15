@@ -10,8 +10,10 @@ from gemma4_engine.inference import (
     GenerationTimings,
     PrefixCacheEntry,
     PrefixCacheBuildResult,
+    _blockwise_decode_size,
     _clear_mlx_cache,
     _clone_prompt_cache,
+    _decode_blockwise_mlx,
     _prefix_cache_key,
     _prefill_step_size,
     _sync_prompt_cache,
@@ -77,6 +79,45 @@ def test_threshold_prefill_cache_policy(monkeypatch: pytest.MonkeyPatch) -> None
     _clear_mlx_cache("threshold", threshold_gb=1)
 
     assert clear_calls == 1
+
+
+def test_blockwise_decode_stops_at_eos_boundary() -> None:
+    class FakeTensor:
+        def __init__(self, values: list[int]) -> None:
+            self.values = values
+
+        def tolist(self) -> list[int]:
+            return self.values
+
+    class FakeMx:
+        @staticmethod
+        def concatenate(values, axis=0):
+            return FakeTensor(list(values))
+
+        @staticmethod
+        def eval(_value) -> None:
+            return None
+
+        @staticmethod
+        def async_eval(_value) -> None:
+            return None
+
+    generated, _prefill, _decode, _ttft, timings = _decode_blockwise_mlx(
+        step=lambda token: token + 1,
+        token=1,
+        max_tokens=8,
+        block_size=4,
+        eos_token_ids={3},
+        prefill_seconds=0.1,
+        timings=GenerationTimings(decode_token_latencies=[]),
+        mx=FakeMx,
+    )
+
+    assert _blockwise_decode_size("custom_blockwise_8") == 8
+    assert _blockwise_decode_size("custom_blockwise_16") == 16
+    assert _blockwise_decode_size("custom_blockwise_32") == 32
+    assert generated == [1, 2]
+    assert timings.decode_token_latencies
 
 
 def test_prefix_cache_key_depends_on_token_sequence() -> None:

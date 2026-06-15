@@ -30,14 +30,14 @@ def test_bench_prefill_step_sizes_parse() -> None:
             "--prefill-sync-policies",
             "eval,async,none",
             "--decode-variants",
-            "custom,custom_defer_ids,mlx_lm_generate_step",
+            "custom,custom_blockwise_16,mlx_lm_generate_step",
             "--include-token-ids",
         ]
     )
 
     assert args.prefill_step_sizes == ("auto", "1024", "2048")
     assert args.prefill_sync_policies == ("eval", "async", "none")
-    assert args.decode_variants == ("custom", "custom_defer_ids", "mlx_lm_generate_step")
+    assert args.decode_variants == ("custom", "custom_blockwise_16", "mlx_lm_generate_step")
     assert args.include_token_ids is True
 
 
