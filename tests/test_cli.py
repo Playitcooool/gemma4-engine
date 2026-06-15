@@ -279,6 +279,8 @@ def test_serve_token_cache_max_disk_mb_parses() -> None:
             "--enable-sessions",
             "--max-sessions",
             "4",
+            "--max-session-tokens",
+            "4096",
         ]
     )
     cli._resolve_profile_defaults(args)
@@ -287,3 +289,4 @@ def test_serve_token_cache_max_disk_mb_parses() -> None:
     assert args.max_prefix_cache_mb == 128
     assert args.enable_sessions is True
     assert args.max_sessions == 4
+    assert args.max_session_tokens == 4096

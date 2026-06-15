@@ -90,6 +90,7 @@ class Gemma4Engine:
     max_token_cache_entries: int = 128
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES
     max_sessions: int = 8
+    max_session_tokens: int | None = None
     mlx_memory_limit_gb: float | None = None
     mlx_cache_limit_gb: float | None = None
     mlx_wired_limit_gb: float | None = None
@@ -341,7 +342,7 @@ class Gemma4Engine:
             previous_generated = (
                 session_state.generated_token_ids if session_state is not None else []
             )
-            self._remember_session(
+            remembered = self._remember_session(
                 session_id,
                 SessionState(
                     token_ids=[*previous_tokens, *prefill_ids, *generated],
@@ -350,6 +351,11 @@ class Gemma4Engine:
                     last_access_time=now(),
                 ),
             )
+            if not remembered:
+                config_warnings.append(
+                    f"session {session_id!r} exceeded max_session_tokens="
+                    f"{self.max_session_tokens}; session cache was not retained"
+                )
             stats.session_count = len(self._sessions)
         return GenerationResult(
             text=_decode(self.loaded.tokenizer, generated),
@@ -407,11 +413,16 @@ class Gemma4Engine:
             for session_id, state in self._sessions.items()
         ]
 
-    def _remember_session(self, session_id: str, state: SessionState) -> None:
+    def _remember_session(self, session_id: str, state: SessionState) -> bool:
+        max_session_tokens = getattr(self, "max_session_tokens", None)
+        if max_session_tokens is not None and len(state.token_ids) > max_session_tokens:
+            self._sessions.pop(session_id, None)
+            return False
         self._sessions[session_id] = state
         self._sessions.move_to_end(session_id)
         while len(self._sessions) > self.max_sessions:
             self._sessions.popitem(last=False)
+        return True
 
     def _generate_with_oom_retry(
         self,
@@ -1542,6 +1553,7 @@ def infer(
     token_cache_dir: str | None = DEFAULT_TOKEN_CACHE_DIR,
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES,
     max_prefix_cache_bytes: int | None = None,
+    max_session_tokens: int | None = None,
     speculative_ngram_min: int = 3,
     speculative_ngram_max: int = 6,
     speculative_draft_tokens: int = 4,
@@ -1558,6 +1570,7 @@ def infer(
         token_cache_dir=token_cache_dir,
         max_token_cache_disk_bytes=max_token_cache_disk_bytes,
         max_prefix_cache_bytes=max_prefix_cache_bytes,
+        max_session_tokens=max_session_tokens,
         mlx_memory_limit_gb=mlx_memory_limit_gb,
         mlx_cache_limit_gb=mlx_cache_limit_gb,
         mlx_wired_limit_gb=mlx_wired_limit_gb,

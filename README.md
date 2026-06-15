@@ -126,6 +126,13 @@ curl -s http://127.0.0.1:8000/generate \
 The second request reuses the session KV cache and only prefills the newly appended prompt. Use
 `"reset_session": true` to clear a specific session before generating.
 
+Bound retained session history with:
+
+```bash
+gemma4 serve --max-session-tokens 8192
+gemma4 chat --max-session-tokens 8192
+```
+
 ## Performance Flags
 
 `--backend auto` and `--backend mlx` both use the MLX runtime.

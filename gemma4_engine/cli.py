@@ -207,6 +207,7 @@ def _run_chat(args) -> int:
             max_prefix_cache_bytes=_optional_mb_to_bytes(args.max_prefix_cache_mb),
             token_cache_dir=args.token_cache_dir,
             max_sessions=args.max_sessions,
+            max_session_tokens=args.max_session_tokens,
             mlx_memory_limit_gb=args.mlx_memory_limit_gb,
             mlx_cache_limit_gb=args.mlx_cache_limit_gb,
             mlx_wired_limit_gb=args.mlx_wired_limit_gb,
@@ -431,6 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8000)
     serve_parser.add_argument("--enable-sessions", action="store_true")
     serve_parser.add_argument("--max-sessions", type=_positive_int, default=None)
+    serve_parser.add_argument("--max-session-tokens", type=_positive_int, default=None)
     serve_parser.add_argument("--max-tokens", type=int, default=128)
     serve_parser.add_argument("--prompt-mode", choices=["chat", "raw"], default="chat")
     serve_parser.add_argument(
@@ -551,6 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
     chat_parser.add_argument("--session-id", default="chat")
     chat_parser.add_argument("--max-sessions", type=_positive_int, default=None)
+    chat_parser.add_argument("--max-session-tokens", type=_positive_int, default=None)
     chat_parser.add_argument("--token-cache-dir", default=DEFAULT_TOKEN_CACHE_DIR, type=_optional_cache_dir)
     chat_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
     chat_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
@@ -730,6 +733,7 @@ def main(argv: list[str] | None = None) -> int:
                     token_cache_dir=args.token_cache_dir,
                     max_token_cache_disk_bytes=_mb_to_bytes(args.token_cache_max_disk_mb),
                     max_sessions=args.max_sessions,
+                    max_session_tokens=args.max_session_tokens,
                     mlx_memory_limit_gb=args.mlx_memory_limit_gb,
                     mlx_cache_limit_gb=args.mlx_cache_limit_gb,
                     mlx_wired_limit_gb=args.mlx_wired_limit_gb,

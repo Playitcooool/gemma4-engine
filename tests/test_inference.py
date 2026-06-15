@@ -784,3 +784,54 @@ def test_session_cache_reuses_prompt_cache_for_followup(
     assert seen_prompt_ids == [[97, 98], [99, 100]]
     assert seen_caches == [session_cache, session_cache]
     assert engine.list_sessions()[0]["tokens"] == 6
+
+
+def test_session_cache_respects_max_session_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeTokenizer:
+        def encode(self, text: str) -> list[int]:
+            return [ord(char) for char in text]
+
+        def decode(self, token_ids: list[int]) -> str:
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    engine = object.__new__(Gemma4Engine)
+    engine.model_path = "fake-model"
+    engine.max_sessions = 8
+    engine.max_session_tokens = 2
+    engine.loaded = SimpleNamespace(
+        tokenizer=FakeTokenizer(),
+        model=object(),
+        warnings=[],
+        config={},
+    )
+    engine.argmax_backend = SimpleNamespace(name="mlx")
+    engine.backend_status = SimpleNamespace(selected="mlx", reason="test")
+    engine._prefix_cache = {}
+    engine._sessions = OrderedDict()
+    engine._token_cache = inference.HierarchicalTokenCache(disk_dir=None)
+    session_cache = [SimpleNamespace(state=[])]
+
+    monkeypatch.setattr(
+        inference,
+        "_make_prompt_cache",
+        lambda _model, max_kv_size=None: session_cache,
+    )
+    monkeypatch.setattr(
+        inference,
+        "_greedy_generate_tokens",
+        lambda **_kwargs: ([33], 0.1, 0.2, 0.3, GenerationTimings()),
+    )
+
+    result = engine.infer(
+        "ab",
+        max_tokens=1,
+        prompt_mode="raw",
+        session_id="main",
+        append_to_session=True,
+    )
+
+    assert engine.list_sessions() == []
+    assert result.stats.session_count == 0
+    assert "exceeded max_session_tokens=2" in result.config_warnings[0]

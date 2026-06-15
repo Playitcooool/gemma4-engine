@@ -53,6 +53,7 @@ class ServerConfig:
     max_token_cache_disk_bytes: int | None = DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES
     max_prefix_cache_bytes: int | None = None
     max_sessions: int = 8
+    max_session_tokens: int | None = None
     mlx_memory_limit_gb: float | None = None
     mlx_cache_limit_gb: float | None = None
     mlx_wired_limit_gb: float | None = None
@@ -68,6 +69,7 @@ class EngineService:
             token_cache_dir=config.token_cache_dir,
             max_token_cache_disk_bytes=config.max_token_cache_disk_bytes,
             max_sessions=config.max_sessions,
+            max_session_tokens=config.max_session_tokens,
             mlx_memory_limit_gb=config.mlx_memory_limit_gb,
             mlx_cache_limit_gb=config.mlx_cache_limit_gb,
             mlx_wired_limit_gb=config.mlx_wired_limit_gb,
@@ -86,6 +88,7 @@ class EngineService:
             "max_token_cache_disk_bytes": self.config.max_token_cache_disk_bytes,
             "max_prefix_cache_bytes": self.config.max_prefix_cache_bytes,
             "max_sessions": self.config.max_sessions,
+            "max_session_tokens": self.config.max_session_tokens,
             "sessions": self.engine.list_sessions(),
             "default_prefill_cache_policy": self.config.default_prefill_cache_policy,
             "default_prefill_sync_policy": self.config.default_prefill_sync_policy,
