@@ -16,8 +16,8 @@ from .token_cache import (
 
 PromptMode = Literal["chat", "raw"]
 PrefillStepSize = Literal["auto", "512", "1024", "2048", "4096", "8192"]
-PrefillCachePolicy = Literal["clear", "retain"]
-PrefillSyncPolicy = Literal["eval", "async", "none"]
+PrefillCachePolicy = Literal["clear", "retain", "periodic", "threshold"]
+PrefillSyncPolicy = Literal["eval", "async", "none", "periodic"]
 DecodeVariant = Literal[
     "custom",
     "custom_no_async",
@@ -102,6 +102,9 @@ class Gemma4Engine:
         prefill_step_size: PrefillStepSize = "auto",
         prefill_cache_policy: PrefillCachePolicy = "clear",
         prefill_sync_policy: PrefillSyncPolicy = "eval",
+        prefill_sync_every: int = 4,
+        prefill_cache_clear_every: int = 8,
+        prefill_cache_threshold_gb: float | None = None,
         kv_bits: int | None = None,
         kv_group_size: int = 64,
         quantized_kv_start: int = 0,
@@ -153,6 +156,9 @@ class Gemma4Engine:
                 prefill_step_size=_prefill_step_size(prefill_step_size, len(prefix_ids)),
                 prefill_cache_policy=prefill_cache_policy,
                 prefill_sync_policy=prefill_sync_policy,
+                prefill_sync_every=prefill_sync_every,
+                prefill_cache_clear_every=prefill_cache_clear_every,
+                prefill_cache_threshold_gb=prefill_cache_threshold_gb,
                 max_kv_size=max_kv_size,
             )
             prefix_kv_cache_lookup_seconds = now() - prefix_lookup_start
@@ -199,6 +205,9 @@ class Gemma4Engine:
                 decode_variant=_decode_variant,
                 prefill_cache_policy=prefill_cache_policy,
                 prefill_sync_policy=prefill_sync_policy,
+                prefill_sync_every=prefill_sync_every,
+                prefill_cache_clear_every=prefill_cache_clear_every,
+                prefill_cache_threshold_gb=prefill_cache_threshold_gb,
                 config_warnings=config_warnings,
             )
         )
@@ -276,6 +285,9 @@ class Gemma4Engine:
         decode_variant: DecodeVariant,
         prefill_cache_policy: PrefillCachePolicy,
         prefill_sync_policy: PrefillSyncPolicy,
+        prefill_sync_every: int,
+        prefill_cache_clear_every: int,
+        prefill_cache_threshold_gb: float | None,
         config_warnings: list[str],
     ) -> tuple[list[int], float, float, float, GenerationTimings]:
         prefill_step_size = initial_prefill_step_size
@@ -298,6 +310,9 @@ class Gemma4Engine:
                     decode_variant=decode_variant,
                     prefill_cache_policy=prefill_cache_policy,
                     prefill_sync_policy=prefill_sync_policy,
+                    prefill_sync_every=prefill_sync_every,
+                    prefill_cache_clear_every=prefill_cache_clear_every,
+                    prefill_cache_threshold_gb=prefill_cache_threshold_gb,
                 )
             except RuntimeError as exc:
                 next_step_size = _smaller_prefill_step_size(prefill_step_size)
@@ -324,6 +339,9 @@ class Gemma4Engine:
         prefill_step_size: int,
         prefill_cache_policy: PrefillCachePolicy = "clear",
         prefill_sync_policy: PrefillSyncPolicy = "eval",
+        prefill_sync_every: int = 4,
+        prefill_cache_clear_every: int = 8,
+        prefill_cache_threshold_gb: float | None = None,
         max_kv_size: int | None = None,
     ) -> PrefixCacheBuildResult:
         timings = GenerationTimings()
@@ -341,19 +359,33 @@ class Gemma4Engine:
         prompt_cache = cache.make_prompt_cache(self.loaded.model, max_kv_size=max_kv_size)
         prompt = mx.array(prefix_ids)
         processed = 0
+        chunk_index = 0
         build_start = now()
         while len(prompt) - processed > 0:
             count = min(prefill_step_size, len(prompt) - processed)
             model_start = now()
             self.loaded.model(prompt[processed : processed + count][None], cache=prompt_cache)
             timings.prefill_model_seconds += now() - model_start
+            is_last_chunk = len(prompt) - (processed + count) <= 0
             sync_start = now()
-            _sync_prompt_cache(prompt_cache, prefill_sync_policy)
+            _sync_prompt_cache(
+                prompt_cache,
+                prefill_sync_policy,
+                chunk_index=chunk_index,
+                is_last_chunk=is_last_chunk,
+                sync_every=prefill_sync_every,
+            )
             timings.prefill_sync_seconds += now() - sync_start
             processed += count
             clear_start = now()
-            _clear_mlx_cache(prefill_cache_policy)
+            _clear_mlx_cache(
+                prefill_cache_policy,
+                chunk_index=chunk_index,
+                clear_every=prefill_cache_clear_every,
+                threshold_gb=prefill_cache_threshold_gb,
+            )
             timings.prefill_clear_cache_seconds += now() - clear_start
+            chunk_index += 1
         build_seconds = now() - build_start
 
         entry = PrefixCacheEntry(token_ids=list(prefix_ids), cache=_clone_prompt_cache(prompt_cache))
@@ -496,17 +528,42 @@ def _percentile(sorted_values: list[float], percentile: float) -> float:
     return sorted_values[index]
 
 
-def _clear_mlx_cache(policy: PrefillCachePolicy) -> None:
+def _clear_mlx_cache(
+    policy: PrefillCachePolicy,
+    *,
+    chunk_index: int = 0,
+    clear_every: int = 8,
+    threshold_gb: float | None = None,
+) -> None:
     if policy == "retain":
         return
-    if policy != "clear":
+    if policy == "periodic":
+        if clear_every < 1:
+            raise ValueError("prefill cache clear interval must be >= 1")
+        if (chunk_index + 1) % clear_every != 0:
+            return
+    elif policy == "threshold":
+        if threshold_gb is None:
+            return
+        import mlx.core as mx
+
+        if mx.get_active_memory() <= _gb_to_bytes(threshold_gb):
+            return
+    elif policy != "clear":
         raise ValueError(f"unknown prefill cache policy: {policy}")
     import mlx.core as mx
 
     mx.clear_cache()
 
 
-def _sync_prompt_cache(prompt_cache: list[object], policy: PrefillSyncPolicy) -> None:
+def _sync_prompt_cache(
+    prompt_cache: list[object],
+    policy: PrefillSyncPolicy,
+    *,
+    chunk_index: int = 0,
+    is_last_chunk: bool = True,
+    sync_every: int = 4,
+) -> None:
     if policy == "none":
         return
     import mlx.core as mx
@@ -517,6 +574,14 @@ def _sync_prompt_cache(prompt_cache: list[object], policy: PrefillSyncPolicy) ->
         return
     if policy == "async":
         mx.async_eval(states)
+        return
+    if policy == "periodic":
+        if sync_every < 1:
+            raise ValueError("prefill sync interval must be >= 1")
+        if is_last_chunk or (chunk_index + 1) % sync_every == 0:
+            mx.eval(states)
+        else:
+            mx.async_eval(states)
         return
     raise ValueError(f"unknown prefill sync policy: {policy}")
 
@@ -577,6 +642,9 @@ def _greedy_generate_tokens(
     decode_variant: DecodeVariant = "custom",
     prefill_cache_policy: PrefillCachePolicy = "clear",
     prefill_sync_policy: PrefillSyncPolicy = "eval",
+    prefill_sync_every: int = 4,
+    prefill_cache_clear_every: int = 8,
+    prefill_cache_threshold_gb: float | None = None,
 ) -> tuple[list[int], float, float, float, GenerationTimings]:
     if backend.name == "mlx":
         return _greedy_generate_tokens_mlx(
@@ -593,6 +661,9 @@ def _greedy_generate_tokens(
             decode_variant=decode_variant,
             prefill_cache_policy=prefill_cache_policy,
             prefill_sync_policy=prefill_sync_policy,
+            prefill_sync_every=prefill_sync_every,
+            prefill_cache_clear_every=prefill_cache_clear_every,
+            prefill_cache_threshold_gb=prefill_cache_threshold_gb,
         )
     if decode_variant != "custom":
         raise ValueError(f"decode variant {decode_variant!r} requires the MLX backend")
@@ -606,19 +677,33 @@ def _greedy_generate_tokens(
 
     timings = GenerationTimings(decode_token_latencies=[])
     prefill_start = now()
+    chunk_index = 0
     while len(prompt) - processed > 1:
         remaining = (len(prompt) - processed) - 1
         count = min(prefill_step_size, remaining)
         model_start = now()
         model(prompt[processed : processed + count][None], cache=prompt_cache)
         timings.prefill_model_seconds += now() - model_start
+        is_last_chunk = (len(prompt) - (processed + count)) <= 1
         sync_start = now()
-        _sync_prompt_cache(prompt_cache, prefill_sync_policy)
+        _sync_prompt_cache(
+            prompt_cache,
+            prefill_sync_policy,
+            chunk_index=chunk_index,
+            is_last_chunk=is_last_chunk,
+            sync_every=prefill_sync_every,
+        )
         timings.prefill_sync_seconds += now() - sync_start
         processed += count
         clear_start = now()
-        _clear_mlx_cache(prefill_cache_policy)
+        _clear_mlx_cache(
+            prefill_cache_policy,
+            chunk_index=chunk_index,
+            clear_every=prefill_cache_clear_every,
+            threshold_gb=prefill_cache_threshold_gb,
+        )
         timings.prefill_clear_cache_seconds += now() - clear_start
+        chunk_index += 1
 
     model_start = now()
     logits = model(prompt[processed:][None], cache=prompt_cache)[:, -1, :]
@@ -670,6 +755,9 @@ def _greedy_generate_tokens_mlx(
     decode_variant: DecodeVariant = "custom",
     prefill_cache_policy: PrefillCachePolicy = "clear",
     prefill_sync_policy: PrefillSyncPolicy = "eval",
+    prefill_sync_every: int = 4,
+    prefill_cache_clear_every: int = 8,
+    prefill_cache_threshold_gb: float | None = None,
 ) -> tuple[list[int], float, float, float, GenerationTimings]:
     if decode_variant == "mlx_lm_generate_step":
         return _greedy_generate_tokens_mlx_generate_step(
@@ -726,19 +814,33 @@ def _greedy_generate_tokens_mlx(
     with wired_limit(model, [generation_stream]):
         prefill_start = now()
         with mx.stream(generation_stream):
+            chunk_index = 0
             while len(prompt) - processed > 1:
                 remaining = (len(prompt) - processed) - 1
                 count = min(prefill_step_size, remaining)
                 model_start = now()
                 model_call(prompt[processed : processed + count])
                 timings.prefill_model_seconds += now() - model_start
+                is_last_chunk = (len(prompt) - (processed + count)) <= 1
                 sync_start = now()
-                _sync_prompt_cache(prompt_cache, prefill_sync_policy)
+                _sync_prompt_cache(
+                    prompt_cache,
+                    prefill_sync_policy,
+                    chunk_index=chunk_index,
+                    is_last_chunk=is_last_chunk,
+                    sync_every=prefill_sync_every,
+                )
                 timings.prefill_sync_seconds += now() - sync_start
                 processed += count
                 clear_start = now()
-                _clear_mlx_cache(prefill_cache_policy)
+                _clear_mlx_cache(
+                    prefill_cache_policy,
+                    chunk_index=chunk_index,
+                    clear_every=prefill_cache_clear_every,
+                    threshold_gb=prefill_cache_threshold_gb,
+                )
                 timings.prefill_clear_cache_seconds += now() - clear_start
+                chunk_index += 1
 
             first_token_start = now()
             token = step(prompt[processed:])
@@ -911,6 +1013,9 @@ def infer(
     prefill_step_size: PrefillStepSize = "auto",
     prefill_cache_policy: PrefillCachePolicy = "clear",
     prefill_sync_policy: PrefillSyncPolicy = "eval",
+    prefill_sync_every: int = 4,
+    prefill_cache_clear_every: int = 8,
+    prefill_cache_threshold_gb: float | None = None,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
@@ -940,6 +1045,9 @@ def infer(
         prefill_step_size=prefill_step_size,
         prefill_cache_policy=prefill_cache_policy,
         prefill_sync_policy=prefill_sync_policy,
+        prefill_sync_every=prefill_sync_every,
+        prefill_cache_clear_every=prefill_cache_clear_every,
+        prefill_cache_threshold_gb=prefill_cache_threshold_gb,
         kv_bits=kv_bits,
         kv_group_size=kv_group_size,
         quantized_kv_start=quantized_kv_start,

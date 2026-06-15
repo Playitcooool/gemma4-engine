@@ -42,11 +42,14 @@ class BenchConfig:
     prefill_step_size: PrefillStepSize = "auto"
     prefill_step_sizes: tuple[PrefillStepSize, ...] | None = PREFILL_STEP_SIZES
     prefill_sync_policies: tuple[PrefillSyncPolicy, ...] = PREFILL_SYNC_POLICIES
+    prefill_sync_every: int = 4
     kv_bits: int | None = None
     kv_group_size: int = 64
     quantized_kv_start: int = 0
     max_kv_size: int | None = None
     prefill_cache_policies: tuple[PrefillCachePolicy, ...] = PREFILL_CACHE_POLICIES
+    prefill_cache_clear_every: int = 8
+    prefill_cache_threshold_gb: float | None = None
     decode_variants: tuple[DecodeVariant, ...] = DECODE_BENCHMARK_VARIANTS
     mlx_memory_limit_gb: float | None = None
     mlx_cache_limit_gb: float | None = None
@@ -92,6 +95,9 @@ def run_benchmark(
                                     prefill_step_size=prefill_step_size,
                                     prefill_cache_policy=prefill_cache_policy,
                                     prefill_sync_policy=prefill_sync_policy,
+                                    prefill_sync_every=config.prefill_sync_every,
+                                    prefill_cache_clear_every=config.prefill_cache_clear_every,
+                                    prefill_cache_threshold_gb=config.prefill_cache_threshold_gb,
                                     kv_bits=config.kv_bits,
                                     kv_group_size=config.kv_group_size,
                                     quantized_kv_start=config.quantized_kv_start,
@@ -110,6 +116,9 @@ def run_benchmark(
                                     prefill_step_size=prefill_step_size,
                                     prefill_cache_policy=prefill_cache_policy,
                                     prefill_sync_policy=prefill_sync_policy,
+                                    prefill_sync_every=config.prefill_sync_every,
+                                    prefill_cache_clear_every=config.prefill_cache_clear_every,
+                                    prefill_cache_threshold_gb=config.prefill_cache_threshold_gb,
                                     kv_bits=config.kv_bits,
                                     kv_group_size=config.kv_group_size,
                                     quantized_kv_start=config.quantized_kv_start,

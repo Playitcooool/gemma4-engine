@@ -62,9 +62,15 @@ def test_infer_advanced_flags_still_parse() -> None:
             "--prefill-step-size",
             "4096",
             "--prefill-cache-policy",
-            "retain",
+            "threshold",
             "--prefill-sync-policy",
-            "async",
+            "periodic",
+            "--prefill-sync-every",
+            "3",
+            "--prefill-cache-clear-every",
+            "5",
+            "--prefill-cache-threshold-gb",
+            "12",
             "--kv-bits",
             "4",
             "--max-kv-size",
@@ -89,8 +95,11 @@ def test_infer_advanced_flags_still_parse() -> None:
 
     assert args.backend == "mlx"
     assert args.prefill_step_size == "4096"
-    assert args.prefill_cache_policy == "retain"
-    assert args.prefill_sync_policy == "async"
+    assert args.prefill_cache_policy == "threshold"
+    assert args.prefill_sync_policy == "periodic"
+    assert args.prefill_sync_every == 3
+    assert args.prefill_cache_clear_every == 5
+    assert args.prefill_cache_threshold_gb == 12
     assert args.kv_bits == 4
     assert args.max_kv_size == 4096
     assert args.mlx_memory_limit_gb == 48

@@ -9,9 +9,11 @@ from gemma4_engine.inference import (
     GenerationTimings,
     PrefixCacheEntry,
     PrefixCacheBuildResult,
+    _clear_mlx_cache,
     _clone_prompt_cache,
     _prefix_cache_key,
     _prefill_step_size,
+    _sync_prompt_cache,
 )
 
 
@@ -23,6 +25,57 @@ def test_auto_prefill_step_size_limits_long_prompt_chunks() -> None:
     assert _prefill_step_size("auto", 16384) == 4096
     assert _prefill_step_size("auto", 65536) == 8192
     assert _prefill_step_size("512", 65536) == 512
+
+
+def test_periodic_prefill_sync_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    import mlx.core as mx
+
+    calls: list[str] = []
+    prompt_cache = [SimpleNamespace(state="state")]
+    monkeypatch.setattr(mx, "eval", lambda _states: calls.append("eval"))
+    monkeypatch.setattr(mx, "async_eval", lambda _states: calls.append("async"))
+
+    _sync_prompt_cache(
+        prompt_cache,
+        "periodic",
+        chunk_index=0,
+        is_last_chunk=False,
+        sync_every=2,
+    )
+    _sync_prompt_cache(
+        prompt_cache,
+        "periodic",
+        chunk_index=1,
+        is_last_chunk=False,
+        sync_every=2,
+    )
+    _sync_prompt_cache(
+        prompt_cache,
+        "periodic",
+        chunk_index=2,
+        is_last_chunk=True,
+        sync_every=2,
+    )
+
+    assert calls == ["async", "eval", "eval"]
+
+
+def test_threshold_prefill_cache_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    import mlx.core as mx
+
+    clear_calls = 0
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 2_000_000_000)
+
+    def clear_cache() -> None:
+        nonlocal clear_calls
+        clear_calls += 1
+
+    monkeypatch.setattr(mx, "clear_cache", clear_cache)
+
+    _clear_mlx_cache("threshold", threshold_gb=3)
+    _clear_mlx_cache("threshold", threshold_gb=1)
+
+    assert clear_calls == 1
 
 
 def test_prefix_cache_key_depends_on_token_sequence() -> None:
@@ -89,12 +142,18 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
         prefill_step_size: int,
         prefill_cache_policy: str,
         prefill_sync_policy: str,
+        prefill_sync_every: int,
+        prefill_cache_clear_every: int,
+        prefill_cache_threshold_gb: float | None,
         max_kv_size: int | None,
     ):
         seen["prefix_ids"] = prefix_ids
         seen["prefix_prefill_step_size"] = prefill_step_size
         seen["prefix_prefill_cache_policy"] = prefill_cache_policy
         seen["prefix_prefill_sync_policy"] = prefill_sync_policy
+        seen["prefix_prefill_sync_every"] = prefill_sync_every
+        seen["prefix_prefill_cache_clear_every"] = prefill_cache_clear_every
+        seen["prefix_prefill_cache_threshold_gb"] = prefill_cache_threshold_gb
         seen["prefix_max_kv_size"] = max_kv_size
         return PrefixCacheBuildResult(
             PrefixCacheEntry(token_ids=prefix_ids, cache=[]),
@@ -121,6 +180,9 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
         prompt_mode="raw",
         prefill_cache_policy="retain",
         prefill_sync_policy="async",
+        prefill_sync_every=3,
+        prefill_cache_clear_every=5,
+        prefill_cache_threshold_gb=12,
         max_kv_size=4096,
         cache_prefix="ab",
         cache_prefix_mode="raw",
@@ -136,6 +198,9 @@ def test_prefix_cache_suffix_prefill_uses_suffix_length(monkeypatch: pytest.Monk
     assert seen["prefix_prefill_step_size"] == 2
     assert seen["prefix_prefill_cache_policy"] == "retain"
     assert seen["prefix_prefill_sync_policy"] == "async"
+    assert seen["prefix_prefill_sync_every"] == 3
+    assert seen["prefix_prefill_cache_clear_every"] == 5
+    assert seen["prefix_prefill_cache_threshold_gb"] == 12
     assert seen["prefix_max_kv_size"] == 4096
     assert seen["suffix_ids"] == [49, 50, 51, 52, 53]
     assert seen["suffix_prefill_step_size"] == 5

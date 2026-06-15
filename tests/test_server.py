@@ -66,7 +66,10 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
             "prompt_mode": "raw",
             "prefill_step_size": "1024",
             "prefill_cache_policy": "retain",
-            "prefill_sync_policy": "async",
+            "prefill_sync_policy": "periodic",
+            "prefill_sync_every": 3,
+            "prefill_cache_clear_every": 5,
+            "prefill_cache_threshold_gb": 12,
             "max_kv_size": 4096,
         }
     )
@@ -81,7 +84,10 @@ def test_generate_returns_text_stats_and_uses_overrides() -> None:
     assert service._seen["prompt_mode"] == "raw"
     assert service._seen["prefill_step_size"] == "1024"
     assert service._seen["prefill_cache_policy"] == "retain"
-    assert service._seen["prefill_sync_policy"] == "async"
+    assert service._seen["prefill_sync_policy"] == "periodic"
+    assert service._seen["prefill_sync_every"] == 3
+    assert service._seen["prefill_cache_clear_every"] == 5
+    assert service._seen["prefill_cache_threshold_gb"] == 12
     assert service._seen["max_kv_size"] == 4096
 
 
@@ -93,6 +99,9 @@ def test_health_reports_loaded_backend() -> None:
     assert service.health()["max_token_cache_disk_bytes"] == 123_000_000
     assert service.health()["default_prefill_cache_policy"] == "clear"
     assert service.health()["default_prefill_sync_policy"] == "eval"
+    assert service.health()["default_prefill_sync_every"] == 4
+    assert service.health()["default_prefill_cache_clear_every"] == 8
+    assert service.health()["default_prefill_cache_threshold_gb"] is None
     assert service.health()["mlx_memory"] == {
         "memory_limit_gb": 48,
         "cache_limit_gb": 40,

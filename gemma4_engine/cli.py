@@ -36,12 +36,12 @@ def _csv_prefill_step_sizes(value: str) -> tuple[str, ...]:
 
 
 def _csv_prefill_sync_policies(value: str) -> tuple[str, ...]:
-    choices = {"eval", "async", "none"}
+    choices = {"eval", "async", "none", "periodic"}
     values = tuple(part.strip() for part in value.split(",") if part.strip())
     invalid = [part for part in values if part not in choices]
     if invalid:
         raise argparse.ArgumentTypeError(
-            "prefill sync policies must be one or more of: eval, async, none"
+            "prefill sync policies must be one or more of: eval, async, none, periodic"
         )
     if not values:
         raise argparse.ArgumentTypeError("must include at least one prefill sync policy")
@@ -137,16 +137,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     infer_parser.add_argument(
         "--prefill-cache-policy",
-        choices=["clear", "retain"],
+        choices=["clear", "retain", "periodic", "threshold"],
         default="clear",
         help="clear MLX allocator cache after prefill chunks, or retain it for high-memory speed tests",
     )
     infer_parser.add_argument(
         "--prefill-sync-policy",
-        choices=["eval", "async", "none"],
+        choices=["eval", "async", "none", "periodic"],
         default="eval",
         help="synchronize MLX prompt-cache states after each prefill chunk",
     )
+    infer_parser.add_argument("--prefill-sync-every", type=_positive_int, default=4)
+    infer_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=8)
+    infer_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     infer_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     infer_parser.add_argument("--kv-group-size", type=int, default=64)
     infer_parser.add_argument("--quantized-kv-start", type=int, default=0)
@@ -191,16 +194,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bench_parser.add_argument(
         "--prefill-cache-policy",
-        choices=["clear", "retain", "both"],
+        choices=["clear", "retain", "periodic", "threshold", "both"],
         default="both",
         help="prefill allocator-cache policy matrix for benchmark runs",
     )
+    bench_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=8)
+    bench_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     bench_parser.add_argument(
         "--prefill-sync-policies",
         type=_csv_prefill_sync_policies,
         default=None,
         help="comma-separated prefill cache-state sync matrix for benchmark runs",
     )
+    bench_parser.add_argument("--prefill-sync-every", type=_positive_int, default=4)
     bench_parser.add_argument(
         "--decode-variants",
         type=_csv_decode_variants,
@@ -238,16 +244,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument(
         "--prefill-cache-policy",
-        choices=["clear", "retain"],
+        choices=["clear", "retain", "periodic", "threshold"],
         default="clear",
         help="clear MLX allocator cache after prefill chunks, or retain it for high-memory speed tests",
     )
     serve_parser.add_argument(
         "--prefill-sync-policy",
-        choices=["eval", "async", "none"],
+        choices=["eval", "async", "none", "periodic"],
         default="eval",
         help="synchronize MLX prompt-cache states after each prefill chunk",
     )
+    serve_parser.add_argument("--prefill-sync-every", type=_positive_int, default=4)
+    serve_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=8)
+    serve_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     serve_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     serve_parser.add_argument("--kv-group-size", type=int, default=64)
     serve_parser.add_argument("--quantized-kv-start", type=int, default=0)
@@ -288,6 +297,9 @@ def main(argv: list[str] | None = None) -> int:
                 prefill_step_size=args.prefill_step_size,
                 prefill_cache_policy=args.prefill_cache_policy,
                 prefill_sync_policy=args.prefill_sync_policy,
+                prefill_sync_every=args.prefill_sync_every,
+                prefill_cache_clear_every=args.prefill_cache_clear_every,
+                prefill_cache_threshold_gb=args.prefill_cache_threshold_gb,
                 kv_bits=args.kv_bits,
                 kv_group_size=args.kv_group_size,
                 quantized_kv_start=args.quantized_kv_start,
@@ -358,9 +370,12 @@ def main(argv: list[str] | None = None) -> int:
                     prefill_sync_policies=args.prefill_sync_policies
                     if args.prefill_sync_policies is not None
                     else PREFILL_SYNC_POLICIES,
+                    prefill_sync_every=args.prefill_sync_every,
                     prefill_cache_policies=_bench_prefill_cache_policies(
                         args.prefill_cache_policy
                     ),
+                    prefill_cache_clear_every=args.prefill_cache_clear_every,
+                    prefill_cache_threshold_gb=args.prefill_cache_threshold_gb,
                     kv_bits=args.kv_bits,
                     kv_group_size=args.kv_group_size,
                     quantized_kv_start=args.quantized_kv_start,
@@ -393,6 +408,9 @@ def main(argv: list[str] | None = None) -> int:
                     default_prefill_step_size=args.prefill_step_size,
                     default_prefill_cache_policy=args.prefill_cache_policy,
                     default_prefill_sync_policy=args.prefill_sync_policy,
+                    default_prefill_sync_every=args.prefill_sync_every,
+                    default_prefill_cache_clear_every=args.prefill_cache_clear_every,
+                    default_prefill_cache_threshold_gb=args.prefill_cache_threshold_gb,
                     default_kv_bits=args.kv_bits,
                     default_kv_group_size=args.kv_group_size,
                     default_quantized_kv_start=args.quantized_kv_start,

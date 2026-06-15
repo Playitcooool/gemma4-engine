@@ -31,6 +31,9 @@ class ServerConfig:
     default_prefill_step_size: PrefillStepSize = "auto"
     default_prefill_cache_policy: PrefillCachePolicy = "clear"
     default_prefill_sync_policy: PrefillSyncPolicy = "eval"
+    default_prefill_sync_every: int = 4
+    default_prefill_cache_clear_every: int = 8
+    default_prefill_cache_threshold_gb: float | None = None
     default_kv_bits: int | None = None
     default_kv_group_size: int = 64
     default_quantized_kv_start: int = 0
@@ -70,6 +73,9 @@ class EngineService:
             "max_token_cache_disk_bytes": self.config.max_token_cache_disk_bytes,
             "default_prefill_cache_policy": self.config.default_prefill_cache_policy,
             "default_prefill_sync_policy": self.config.default_prefill_sync_policy,
+            "default_prefill_sync_every": self.config.default_prefill_sync_every,
+            "default_prefill_cache_clear_every": self.config.default_prefill_cache_clear_every,
+            "default_prefill_cache_threshold_gb": self.config.default_prefill_cache_threshold_gb,
             "default_max_kv_size": self.config.default_max_kv_size,
             "mlx_memory": {
                 "memory_limit_gb": self.config.mlx_memory_limit_gb,
@@ -102,15 +108,41 @@ class EngineService:
             "prefill_cache_policy",
             self.config.default_prefill_cache_policy,
         )
-        if prefill_cache_policy not in ("clear", "retain"):
-            raise ValueError("prefill_cache_policy must be 'clear' or 'retain'")
+        if prefill_cache_policy not in ("clear", "retain", "periodic", "threshold"):
+            raise ValueError(
+                "prefill_cache_policy must be 'clear', 'retain', 'periodic', or 'threshold'"
+            )
 
         prefill_sync_policy = payload.get(
             "prefill_sync_policy",
             self.config.default_prefill_sync_policy,
         )
-        if prefill_sync_policy not in ("eval", "async", "none"):
-            raise ValueError("prefill_sync_policy must be 'eval', 'async', or 'none'")
+        if prefill_sync_policy not in ("eval", "async", "none", "periodic"):
+            raise ValueError("prefill_sync_policy must be 'eval', 'async', 'none', or 'periodic'")
+
+        prefill_sync_every = int(
+            payload.get("prefill_sync_every", self.config.default_prefill_sync_every)
+        )
+        if prefill_sync_every < 1:
+            raise ValueError("prefill_sync_every must be >= 1")
+
+        prefill_cache_clear_every = int(
+            payload.get(
+                "prefill_cache_clear_every",
+                self.config.default_prefill_cache_clear_every,
+            )
+        )
+        if prefill_cache_clear_every < 1:
+            raise ValueError("prefill_cache_clear_every must be >= 1")
+
+        prefill_cache_threshold_gb = payload.get(
+            "prefill_cache_threshold_gb",
+            self.config.default_prefill_cache_threshold_gb,
+        )
+        if prefill_cache_threshold_gb is not None:
+            prefill_cache_threshold_gb = float(prefill_cache_threshold_gb)
+            if prefill_cache_threshold_gb <= 0:
+                raise ValueError("prefill_cache_threshold_gb must be > 0")
 
         kv_bits = payload.get("kv_bits", self.config.default_kv_bits)
         if kv_bits is not None:
@@ -147,6 +179,9 @@ class EngineService:
                 prefill_step_size=prefill_step_size,
                 prefill_cache_policy=prefill_cache_policy,
                 prefill_sync_policy=prefill_sync_policy,
+                prefill_sync_every=prefill_sync_every,
+                prefill_cache_clear_every=prefill_cache_clear_every,
+                prefill_cache_threshold_gb=prefill_cache_threshold_gb,
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
                 quantized_kv_start=quantized_kv_start,

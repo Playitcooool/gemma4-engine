@@ -110,6 +110,11 @@ gemma4 bench \
 `--prefill-cache-policy retain` keeps the MLX allocator cache between prefill chunks. It can improve
 prefill throughput on some runs but may spend more memory, so keep it benchmark-gated.
 
+For lower synchronization overhead, `--prefill-sync-policy periodic --prefill-sync-every 4`
+evaluates cache state every few chunks and on the final chunk. For memory-aware cache clearing,
+`--prefill-cache-policy threshold --prefill-cache-threshold-gb 18` clears only after active MLX
+memory crosses the threshold.
+
 For machines with enough unified memory, the CLI can raise MLX memory residency/cache limits before
 loading the model:
 
