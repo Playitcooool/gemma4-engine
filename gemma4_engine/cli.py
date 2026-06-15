@@ -13,6 +13,7 @@ from .benchmark import (
     benchmark_json,
     benchmark_summary,
     run_benchmark,
+    single_user_latency_scenarios,
 )
 from .constants import DEFAULT_MODEL_PATH
 from .inference import DecodeVariant, Gemma4Engine, infer
@@ -324,6 +325,12 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument("--json", action="store_true")
 
     bench_parser = subparsers.add_parser("bench")
+    bench_parser.add_argument(
+        "--profile",
+        choices=["matrix", "single-user-latency"],
+        default="matrix",
+        help="benchmark preset; matrix uses the explicit prompt/decode grids",
+    )
     bench_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
     bench_parser.add_argument("--backend", choices=["mlx", "auto"], default="auto")
     bench_parser.add_argument("--prompt-tokens", default="128,512,2048")
@@ -593,6 +600,10 @@ def main(argv: list[str] | None = None) -> int:
                     mlx_cache_limit_gb=args.mlx_cache_limit_gb,
                     mlx_wired_limit_gb=args.mlx_wired_limit_gb,
                     include_token_ids=args.include_token_ids,
+                    scenarios=single_user_latency_scenarios()
+                    if args.profile == "single-user-latency"
+                    else None,
+                    benchmark_profile=args.profile,
                 ),
             )
         except RuntimeError as exc:

@@ -55,6 +55,13 @@ Use `--json` when you need the full benchmark payload:
 gemma4 bench --backend mlx --prompt-tokens 128,512 --decode-tokens 64 --warmups 1 --runs 3 --json
 ```
 
+Run the single-user latency preset to cover short chat, long prompts, repeated-prefix reuse, and
+multi-turn session reuse:
+
+```bash
+gemma4 bench --backend mlx --profile single-user-latency --warmups 1 --runs 3
+```
+
 Interactive local chat loads the model once and keeps a session KV cache alive:
 
 ```bash

@@ -1,13 +1,23 @@
 from types import SimpleNamespace
 
 import gemma4_engine.benchmark as benchmark
-from gemma4_engine.benchmark import BenchConfig, benchmark_summary, run_benchmark
+from gemma4_engine.benchmark import (
+    BenchConfig,
+    BenchScenario,
+    benchmark_summary,
+    run_benchmark,
+    single_user_latency_scenarios,
+)
 from gemma4_engine.stats import RunStats
 
 
 class FakeEngine:
     def __init__(self, **kwargs) -> None:
         self.model_path = kwargs["model_path"]
+        self.reset_sessions: list[str] = []
+
+    def reset_session(self, session_id: str) -> None:
+        self.reset_sessions.append(session_id)
 
     def infer(self, prompt: str, **kwargs):
         token_ids = [1, 2, 3]
@@ -48,6 +58,7 @@ def test_benchmark_reports_cases_and_summary(monkeypatch) -> None:
     )
 
     cases = payload["cases"]
+    assert payload["benchmark_profile"] == "matrix"
     assert payload["prefill_step_sizes"] == ["auto", "1024"]
     assert payload["decode_variants"] == [
         "custom",
@@ -71,6 +82,7 @@ def test_benchmark_reports_cases_and_summary(monkeypatch) -> None:
         "custom_speculative_ngram",
     ]
     assert cases[0]["tokens_match_baseline"] is True
+    assert cases[0]["scenario"] == "synthetic_128_64"
     assert cases[0]["generated_token_count"] == 3
     assert cases[0]["generated_token_hash"]
     assert cases[0]["median"]["prefill_tokens_per_second_median"] == 256.0
@@ -79,6 +91,7 @@ def test_benchmark_reports_cases_and_summary(monkeypatch) -> None:
 
     summary = benchmark_summary(payload)
     assert "Benchmark summary for fake (backend=mlx)" in summary
+    assert "scenario" in summary
     assert "prefill tok/s" in summary
     assert "decode tok/s" in summary
     assert "prefill model s" in summary
@@ -109,3 +122,69 @@ def test_benchmark_can_include_full_token_ids(monkeypatch) -> None:
     )
 
     assert payload["cases"][0]["generated_token_ids"] == [1, 2, 3]
+
+
+def test_single_user_latency_profile_scenarios_cover_plan_cases() -> None:
+    scenarios = single_user_latency_scenarios()
+    names = {scenario.name for scenario in scenarios}
+
+    assert "short_chat_128_64" in names
+    assert "long_prompt_16384_128" in names
+    assert "repeated_prefix_8192_512" in names
+    assert "multi_turn_3" in names
+    assert any(scenario.cache_prefix for scenario in scenarios)
+    assert any(scenario.session_id for scenario in scenarios)
+
+
+def test_benchmark_scenario_passes_prefix_and_session_setup(monkeypatch) -> None:
+    engines: list[FakeEngine] = []
+
+    class TrackingEngine(FakeEngine):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.calls: list[dict[str, object]] = []
+            engines.append(self)
+
+        def infer(self, prompt: str, **kwargs):
+            self.calls.append({"prompt": prompt, **kwargs})
+            return super().infer(prompt, **kwargs)
+
+    monkeypatch.setattr(benchmark, "Gemma4Engine", TrackingEngine)
+
+    payload = run_benchmark(
+        model_path="fake",
+        backend="mlx",
+        config=BenchConfig(
+            prompt_lengths=[],
+            decode_lengths=[],
+            warmups=0,
+            runs=1,
+            prefill_step_sizes=("auto",),
+            prefill_cache_policies=("clear",),
+            decode_variants=("custom",),
+            scenarios=(
+                BenchScenario(
+                    name="scenario",
+                    prompt="prefix suffix",
+                    prompt_length_hint=2,
+                    decode_length=1,
+                    cache_prefix="prefix",
+                    session_id="session",
+                    append_to_session=True,
+                    setup_prompts=("prefix",),
+                ),
+            ),
+            benchmark_profile="single-user-latency",
+        ),
+    )
+
+    engine = engines[0]
+    assert payload["benchmark_profile"] == "single-user-latency"
+    assert payload["cases"][0]["scenario"] == "scenario"
+    assert payload["cases"][0]["cache_prefix_tokens"] == 1
+    assert payload["cases"][0]["session_id"] == "session"
+    assert engine.reset_sessions == ["session"]
+    assert engine.calls[0]["prompt"] == "prefix"
+    assert engine.calls[0]["append_to_session"] is True
+    assert engine.calls[1]["cache_prefix"] == "prefix"
+    assert engine.calls[1]["session_id"] == "session"

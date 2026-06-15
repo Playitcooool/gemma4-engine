@@ -18,6 +18,7 @@ def test_bench_csv_defaults() -> None:
     parser = build_parser()
     args = parser.parse_args(["bench"])
 
+    assert args.profile == "matrix"
     assert args.prompt_tokens == "128,512,2048"
     assert args.decode_tokens == "64,128,256"
     assert args.prefill_step_sizes == ("auto", "512", "1024", "2048", "4096", "8192")
@@ -30,6 +31,8 @@ def test_bench_prefill_step_sizes_parse() -> None:
     args = parser.parse_args(
         [
             "bench",
+            "--profile",
+            "single-user-latency",
             "--prefill-step-sizes",
             "auto,1024,2048",
             "--prefill-sync-policies",
@@ -40,6 +43,7 @@ def test_bench_prefill_step_sizes_parse() -> None:
         ]
     )
 
+    assert args.profile == "single-user-latency"
     assert args.prefill_step_sizes == ("auto", "1024", "2048")
     assert args.prefill_sync_policies == ("eval", "async", "none")
     assert args.decode_variants == (

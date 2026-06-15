@@ -38,6 +38,19 @@ DECODE_BENCHMARK_VARIANTS: tuple[DecodeVariant, ...] = (
 
 
 @dataclass(frozen=True)
+class BenchScenario:
+    name: str
+    prompt: str
+    prompt_length_hint: int
+    decode_length: int
+    cache_prefix: str | None = None
+    session_id: str | None = None
+    reset_session: bool = False
+    append_to_session: bool = False
+    setup_prompts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class BenchConfig:
     prompt_lengths: list[int]
     decode_lengths: list[int]
@@ -62,10 +75,82 @@ class BenchConfig:
     speculative_ngram_min: int = 3
     speculative_ngram_max: int = 6
     speculative_draft_tokens: int = 4
+    scenarios: tuple[BenchScenario, ...] | None = None
+    benchmark_profile: str = "matrix"
 
 
 def synthetic_prompt(token_count: int) -> str:
     return " ".join(["Benchmark"] * token_count)
+
+
+def single_user_latency_scenarios() -> tuple[BenchScenario, ...]:
+    scenarios: list[BenchScenario] = []
+    for prompt_length in (128, 512):
+        for decode_length in (64, 128):
+            scenarios.append(
+                BenchScenario(
+                    name=f"short_chat_{prompt_length}_{decode_length}",
+                    prompt=synthetic_prompt(prompt_length),
+                    prompt_length_hint=prompt_length,
+                    decode_length=decode_length,
+                )
+            )
+    for prompt_length in (2048, 8192, 16384):
+        for decode_length in (64, 128):
+            scenarios.append(
+                BenchScenario(
+                    name=f"long_prompt_{prompt_length}_{decode_length}",
+                    prompt=synthetic_prompt(prompt_length),
+                    prompt_length_hint=prompt_length,
+                    decode_length=decode_length,
+                )
+            )
+    for prefix_length in (2048, 8192):
+        prefix = synthetic_prompt(prefix_length)
+        for suffix_length in (128, 512):
+            suffix = " ".join(["Question"] * suffix_length)
+            scenarios.append(
+                BenchScenario(
+                    name=f"repeated_prefix_{prefix_length}_{suffix_length}",
+                    prompt=f"{prefix} {suffix}",
+                    prompt_length_hint=prefix_length + suffix_length,
+                    decode_length=64,
+                    cache_prefix=prefix,
+                )
+            )
+    base_turn = synthetic_prompt(512)
+    scenarios.extend(
+        (
+            BenchScenario(
+                name="multi_turn_1",
+                prompt=base_turn,
+                prompt_length_hint=512,
+                decode_length=128,
+                session_id="bench_multi_turn",
+                reset_session=True,
+                append_to_session=True,
+            ),
+            BenchScenario(
+                name="multi_turn_2",
+                prompt=synthetic_prompt(256),
+                prompt_length_hint=256,
+                decode_length=128,
+                session_id="bench_multi_turn",
+                append_to_session=True,
+                setup_prompts=(base_turn,),
+            ),
+            BenchScenario(
+                name="multi_turn_3",
+                prompt=synthetic_prompt(256),
+                prompt_length_hint=256,
+                decode_length=128,
+                session_id="bench_multi_turn",
+                append_to_session=True,
+                setup_prompts=(base_turn, synthetic_prompt(256)),
+            ),
+        )
+    )
+    return tuple(scenarios)
 
 
 def run_benchmark(
@@ -86,101 +171,143 @@ def run_benchmark(
         mlx_cache_limit_gb=config.mlx_cache_limit_gb,
         mlx_wired_limit_gb=config.mlx_wired_limit_gb,
     )
-    for prompt_length in config.prompt_lengths:
-        for decode_length in config.decode_lengths:
-            prompt = synthetic_prompt(prompt_length)
-            baseline_token_ids: list[int] | None = None
-            for prefill_step_size in prefill_step_sizes:
-                for prefill_sync_policy in prefill_sync_policies:
-                    for prefill_cache_policy in prefill_cache_policies:
-                        for decode_variant in decode_variants:
-                            for _ in range(config.warmups):
-                                engine.infer(
-                                    prompt,
-                                    max_tokens=decode_length,
-                                    prompt_mode="raw",
-                                    prefill_step_size=prefill_step_size,
-                                    prefill_cache_policy=prefill_cache_policy,
-                                    prefill_sync_policy=prefill_sync_policy,
-                                    prefill_sync_every=config.prefill_sync_every,
-                                    prefill_cache_clear_every=config.prefill_cache_clear_every,
-                                    prefill_cache_threshold_gb=config.prefill_cache_threshold_gb,
-                                    speculative_ngram_min=config.speculative_ngram_min,
-                                    speculative_ngram_max=config.speculative_ngram_max,
-                                    speculative_draft_tokens=config.speculative_draft_tokens,
-                                    kv_bits=config.kv_bits,
-                                    kv_group_size=config.kv_group_size,
-                                    quantized_kv_start=config.quantized_kv_start,
-                                    max_kv_size=config.max_kv_size,
-                                    _decode_variant=decode_variant,
-                                )
-
-                            measured: list[RunStats] = []
-                            token_runs: list[list[int]] = []
-                            for _ in range(config.runs):
-                                reset_peak_memory()
-                                result = engine.infer(
-                                    prompt,
-                                    max_tokens=decode_length,
-                                    prompt_mode="raw",
-                                    prefill_step_size=prefill_step_size,
-                                    prefill_cache_policy=prefill_cache_policy,
-                                    prefill_sync_policy=prefill_sync_policy,
-                                    prefill_sync_every=config.prefill_sync_every,
-                                    prefill_cache_clear_every=config.prefill_cache_clear_every,
-                                    prefill_cache_threshold_gb=config.prefill_cache_threshold_gb,
-                                    speculative_ngram_min=config.speculative_ngram_min,
-                                    speculative_ngram_max=config.speculative_ngram_max,
-                                    speculative_draft_tokens=config.speculative_draft_tokens,
-                                    kv_bits=config.kv_bits,
-                                    kv_group_size=config.kv_group_size,
-                                    quantized_kv_start=config.quantized_kv_start,
-                                    max_kv_size=config.max_kv_size,
-                                    _decode_variant=decode_variant,
-                                )
-                                measured.append(result.stats)
-                                token_runs.append(result.token_ids)
-
-                            if baseline_token_ids is None:
-                                baseline_token_ids = token_runs[0] if token_runs else []
-                            tokens_match_baseline = all(
-                                row == baseline_token_ids for row in token_runs
+    scenarios = config.scenarios or tuple(
+        BenchScenario(
+            name=f"synthetic_{prompt_length}_{decode_length}",
+            prompt=synthetic_prompt(prompt_length),
+            prompt_length_hint=prompt_length,
+            decode_length=decode_length,
+        )
+        for prompt_length in config.prompt_lengths
+        for decode_length in config.decode_lengths
+    )
+    for scenario in scenarios:
+        baseline_token_ids: list[int] | None = None
+        for prefill_step_size in prefill_step_sizes:
+            for prefill_sync_policy in prefill_sync_policies:
+                for prefill_cache_policy in prefill_cache_policies:
+                    for decode_variant in decode_variants:
+                        for _ in range(config.warmups):
+                            _prepare_benchmark_scenario(
+                                engine,
+                                scenario,
+                                prefill_step_size=prefill_step_size,
+                                prefill_cache_policy=prefill_cache_policy,
+                                prefill_sync_policy=prefill_sync_policy,
+                                config=config,
+                                decode_variant=decode_variant,
                             )
-                            median = median_stats(measured)
-
-                            cases.append(
-                                {
-                                    "prompt_length_hint": prompt_length,
-                                    "decode_tokens_requested": decode_length,
-                                    "prefill_step_size": prefill_step_size,
-                                    "prefill_sync_policy": prefill_sync_policy,
-                                    "prefill_cache_policy": prefill_cache_policy,
-                                    "decode_variant": decode_variant,
-                                    "max_kv_size": config.max_kv_size,
-                                    "tokens_match_baseline": tokens_match_baseline,
-                                    "generated_token_count": len(token_runs[0])
-                                    if token_runs
-                                    else 0,
-                                    "generated_token_hash": _token_hash(
-                                        token_runs[0] if token_runs else []
-                                    ),
-                                    "runs": [row.to_dict() for row in measured],
-                                    "median": median,
-                                    "best_decode_tokens_per_second": max(
-                                        row.decode_tokens_per_second for row in measured
-                                    ),
-                                    "best_total_tokens_per_second": max(
-                                        row.total_tokens_per_second for row in measured
-                                    ),
-                                }
+                            engine.infer(
+                                scenario.prompt,
+                                max_tokens=scenario.decode_length,
+                                prompt_mode="raw",
+                                prefill_step_size=prefill_step_size,
+                                prefill_cache_policy=prefill_cache_policy,
+                                prefill_sync_policy=prefill_sync_policy,
+                                prefill_sync_every=config.prefill_sync_every,
+                                prefill_cache_clear_every=config.prefill_cache_clear_every,
+                                prefill_cache_threshold_gb=config.prefill_cache_threshold_gb,
+                                speculative_ngram_min=config.speculative_ngram_min,
+                                speculative_ngram_max=config.speculative_ngram_max,
+                                speculative_draft_tokens=config.speculative_draft_tokens,
+                                kv_bits=config.kv_bits,
+                                kv_group_size=config.kv_group_size,
+                                quantized_kv_start=config.quantized_kv_start,
+                                max_kv_size=config.max_kv_size,
+                                cache_prefix=scenario.cache_prefix,
+                                cache_prefix_mode="raw",
+                                session_id=scenario.session_id,
+                                reset_session=scenario.reset_session,
+                                append_to_session=scenario.append_to_session,
+                                _decode_variant=decode_variant,
                             )
-                            if config.include_token_ids:
-                                cases[-1]["generated_token_ids"] = (
+
+                        measured: list[RunStats] = []
+                        token_runs: list[list[int]] = []
+                        for _ in range(config.runs):
+                            reset_peak_memory()
+                            _prepare_benchmark_scenario(
+                                engine,
+                                scenario,
+                                prefill_step_size=prefill_step_size,
+                                prefill_cache_policy=prefill_cache_policy,
+                                prefill_sync_policy=prefill_sync_policy,
+                                config=config,
+                                decode_variant=decode_variant,
+                            )
+                            result = engine.infer(
+                                scenario.prompt,
+                                max_tokens=scenario.decode_length,
+                                prompt_mode="raw",
+                                prefill_step_size=prefill_step_size,
+                                prefill_cache_policy=prefill_cache_policy,
+                                prefill_sync_policy=prefill_sync_policy,
+                                prefill_sync_every=config.prefill_sync_every,
+                                prefill_cache_clear_every=config.prefill_cache_clear_every,
+                                prefill_cache_threshold_gb=config.prefill_cache_threshold_gb,
+                                speculative_ngram_min=config.speculative_ngram_min,
+                                speculative_ngram_max=config.speculative_ngram_max,
+                                speculative_draft_tokens=config.speculative_draft_tokens,
+                                kv_bits=config.kv_bits,
+                                kv_group_size=config.kv_group_size,
+                                quantized_kv_start=config.quantized_kv_start,
+                                max_kv_size=config.max_kv_size,
+                                cache_prefix=scenario.cache_prefix,
+                                cache_prefix_mode="raw",
+                                session_id=scenario.session_id,
+                                reset_session=scenario.reset_session,
+                                append_to_session=scenario.append_to_session,
+                                _decode_variant=decode_variant,
+                            )
+                            measured.append(result.stats)
+                            token_runs.append(result.token_ids)
+
+                        if baseline_token_ids is None:
+                            baseline_token_ids = token_runs[0] if token_runs else []
+                        tokens_match_baseline = all(
+                            row == baseline_token_ids for row in token_runs
+                        )
+                        median = median_stats(measured)
+
+                        cases.append(
+                            {
+                                "scenario": scenario.name,
+                                "prompt_length_hint": scenario.prompt_length_hint,
+                                "decode_tokens_requested": scenario.decode_length,
+                                "cache_prefix_tokens": len(scenario.cache_prefix.split())
+                                if scenario.cache_prefix
+                                else 0,
+                                "session_id": scenario.session_id,
+                                "prefill_step_size": prefill_step_size,
+                                "prefill_sync_policy": prefill_sync_policy,
+                                "prefill_cache_policy": prefill_cache_policy,
+                                "decode_variant": decode_variant,
+                                "max_kv_size": config.max_kv_size,
+                                "tokens_match_baseline": tokens_match_baseline,
+                                "generated_token_count": len(token_runs[0])
+                                if token_runs
+                                else 0,
+                                "generated_token_hash": _token_hash(
                                     token_runs[0] if token_runs else []
-                                )
+                                ),
+                                "runs": [row.to_dict() for row in measured],
+                                "median": median,
+                                "best_decode_tokens_per_second": max(
+                                    row.decode_tokens_per_second for row in measured
+                                ),
+                                "best_total_tokens_per_second": max(
+                                    row.total_tokens_per_second for row in measured
+                                ),
+                            }
+                        )
+                        if config.include_token_ids:
+                            cases[-1]["generated_token_ids"] = (
+                                token_runs[0] if token_runs else []
+                            )
     payload = {
         "model_path": model_path,
         "backend_requested": backend,
+        "benchmark_profile": config.benchmark_profile,
         "prefill_step_sizes": list(prefill_step_sizes),
         "prefill_sync_policies": list(prefill_sync_policies),
         "decode_variants": list(decode_variants),
@@ -194,6 +321,44 @@ def run_benchmark(
         "cases": cases,
     }
     return payload
+
+
+def _prepare_benchmark_scenario(
+    engine: Gemma4Engine,
+    scenario: BenchScenario,
+    *,
+    prefill_step_size: PrefillStepSize,
+    prefill_cache_policy: PrefillCachePolicy,
+    prefill_sync_policy: PrefillSyncPolicy,
+    config: BenchConfig,
+    decode_variant: DecodeVariant,
+) -> None:
+    if not scenario.session_id:
+        return
+    engine.reset_session(scenario.session_id)
+    for setup_prompt in scenario.setup_prompts:
+        engine.infer(
+            setup_prompt,
+            max_tokens=1,
+            prompt_mode="raw",
+            prefill_step_size=prefill_step_size,
+            prefill_cache_policy=prefill_cache_policy,
+            prefill_sync_policy=prefill_sync_policy,
+            prefill_sync_every=config.prefill_sync_every,
+            prefill_cache_clear_every=config.prefill_cache_clear_every,
+            prefill_cache_threshold_gb=config.prefill_cache_threshold_gb,
+            speculative_ngram_min=config.speculative_ngram_min,
+            speculative_ngram_max=config.speculative_ngram_max,
+            speculative_draft_tokens=config.speculative_draft_tokens,
+            kv_bits=config.kv_bits,
+            kv_group_size=config.kv_group_size,
+            quantized_kv_start=config.quantized_kv_start,
+            max_kv_size=config.max_kv_size,
+            session_id=scenario.session_id,
+            reset_session=False,
+            append_to_session=True,
+            _decode_variant=decode_variant,
+        )
 
 
 def _with_custom_baseline(variants: tuple[DecodeVariant, ...]) -> tuple[DecodeVariant, ...]:
@@ -250,6 +415,7 @@ def benchmark_summary(payload: dict[str, object]) -> str:
         if not isinstance(median, dict):
             median = {}
         group_key = (
+            str(case.get("scenario", "")),
             int(case["prompt_length_hint"]),
             int(case["decode_tokens_requested"]),
         )
@@ -277,8 +443,9 @@ def benchmark_summary(payload: dict[str, object]) -> str:
         )
         rows.append(
             [
-                str(group_key[0]),
+                str(case.get("scenario", "")),
                 str(group_key[1]),
+                str(group_key[2]),
                 str(case["prefill_step_size"]),
                 str(case["prefill_sync_policy"]),
                 str(case["prefill_cache_policy"]),
@@ -308,6 +475,7 @@ def benchmark_summary(payload: dict[str, object]) -> str:
         "",
         _format_table(
             [
+                "scenario",
                 "prompt",
                 "decode",
                 "step",
@@ -337,7 +505,7 @@ def benchmark_summary(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _baseline_cases(payload: dict[str, object]) -> dict[tuple[int, int], dict[str, object]]:
+def _baseline_cases(payload: dict[str, object]) -> dict[tuple[str, int, int], dict[str, object]]:
     cases = payload.get("cases", [])
     if not isinstance(cases, list):
         return {}
@@ -353,6 +521,7 @@ def _baseline_cases(payload: dict[str, object]) -> dict[tuple[int, int], dict[st
         ):
             baselines[
                 (
+                    str(case.get("scenario", "")),
                     int(case["prompt_length_hint"]),
                     int(case["decode_tokens_requested"]),
                 )
