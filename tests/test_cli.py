@@ -9,6 +9,7 @@ from gemma4_engine.stats import RunStats
 def test_default_model_path() -> None:
     parser = build_parser()
     args = parser.parse_args(["infer", "--prompt", "hello"])
+    cli._resolve_profile_defaults(args)
 
     assert args.model == DEFAULT_MODEL_PATH
 
@@ -53,21 +54,63 @@ def test_bench_prefill_step_sizes_parse() -> None:
 def test_serve_simple_defaults() -> None:
     parser = build_parser()
     args = parser.parse_args(["serve"])
+    cli._resolve_profile_defaults(args)
 
     assert args.model == DEFAULT_MODEL_PATH
     assert args.backend == "auto"
     assert args.port == 8000
+    assert args.prefill_cache_policy == "clear"
+    assert args.prefill_sync_policy == "eval"
+    assert args.max_sessions == 8
 
 
 def test_chat_defaults() -> None:
     parser = build_parser()
     args = parser.parse_args(["chat"])
+    cli._resolve_profile_defaults(args)
 
     assert args.model == DEFAULT_MODEL_PATH
+    assert args.profile == "single_user_fast"
     assert args.prefill_cache_policy == "retain"
     assert args.prefill_sync_policy == "async"
     assert args.session_id == "chat"
     assert args.max_sessions == 4
+
+
+def test_single_user_fast_profile_defaults() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["serve", "--profile", "single_user_fast"])
+    cli._resolve_profile_defaults(args)
+
+    assert args.prefill_step_size == "auto"
+    assert args.prefill_cache_policy == "retain"
+    assert args.prefill_sync_policy == "async"
+    assert args.prefill_sync_every == 4
+    assert args.prefill_cache_clear_every == 8
+    assert args.decode_variant == "custom"
+    assert args.max_sessions == 4
+
+
+def test_profile_does_not_override_explicit_flags() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "serve",
+            "--profile",
+            "single_user_fast",
+            "--prefill-cache-policy",
+            "clear",
+            "--prefill-sync-policy",
+            "periodic",
+            "--max-sessions",
+            "9",
+        ]
+    )
+    cli._resolve_profile_defaults(args)
+
+    assert args.prefill_cache_policy == "clear"
+    assert args.prefill_sync_policy == "periodic"
+    assert args.max_sessions == 9
 
 
 def test_chat_loop_uses_session_cache(monkeypatch, capsys) -> None:
@@ -102,6 +145,7 @@ def test_chat_loop_uses_session_cache(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "Gemma4Engine", FakeEngine)
     monkeypatch.setattr("builtins.input", lambda _prompt: next(inputs))
     args = build_parser().parse_args(["chat", "--session-id", "main"])
+    cli._resolve_profile_defaults(args)
 
     assert cli._run_chat(args) == 0
 
@@ -163,6 +207,7 @@ def test_infer_advanced_flags_still_parse() -> None:
             "--json",
         ]
     )
+    cli._resolve_profile_defaults(args)
 
     assert args.backend == "mlx"
     assert args.prefill_step_size == "4096"
@@ -197,6 +242,7 @@ def test_token_cache_dir_empty_string_disables_disk_cache() -> None:
             "",
         ]
     )
+    cli._resolve_profile_defaults(args)
 
     assert args.token_cache_dir is None
 
@@ -213,6 +259,7 @@ def test_serve_token_cache_max_disk_mb_parses() -> None:
             "4",
         ]
     )
+    cli._resolve_profile_defaults(args)
 
     assert args.token_cache_max_disk_mb == 250
     assert args.enable_sessions is True

@@ -122,6 +122,16 @@ The default `--prefill-step-size auto` is adaptive: 1024-token chunks for short 
 tok/s, total tok/s, time to first token, peak memory, speculative acceptance rate, and speedups
 against the baseline row.
 
+The `single_user_fast` profile applies the local speed defaults from the optimization plan:
+adaptive prefill chunks, retained allocator cache, async prefill sync, `custom` streaming decode,
+and four session slots. It is the default for `gemma4 chat`; for one-shot inference or the server,
+enable it explicitly:
+
+```bash
+gemma4 infer --profile single_user_fast --prompt "Say hi."
+gemma4 serve --profile single_user_fast
+```
+
 Useful benchmark sweeps:
 
 ```bash

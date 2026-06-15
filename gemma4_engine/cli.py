@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from dataclasses import dataclass
+
 from .benchmark import (
     DECODE_BENCHMARK_VARIANTS,
     PREFILL_STEP_SIZES,
@@ -16,6 +18,27 @@ from .constants import DEFAULT_MODEL_PATH
 from .inference import DecodeVariant, Gemma4Engine, infer
 from .server import ServerConfig, run_server
 from .token_cache import DEFAULT_MAX_TOKEN_CACHE_DISK_BYTES, DEFAULT_TOKEN_CACHE_DIR
+
+
+@dataclass(frozen=True)
+class RuntimeProfile:
+    prefill_step_size: str = "auto"
+    prefill_cache_policy: str = "clear"
+    prefill_sync_policy: str = "eval"
+    prefill_sync_every: int = 4
+    prefill_cache_clear_every: int = 8
+    decode_variant: DecodeVariant = "custom"
+    max_sessions: int = 8
+
+
+RUNTIME_PROFILES: dict[str, RuntimeProfile] = {
+    "default": RuntimeProfile(),
+    "single_user_fast": RuntimeProfile(
+        prefill_cache_policy="retain",
+        prefill_sync_policy="async",
+        max_sessions=4,
+    ),
+}
 
 
 def _csv_ints(value: str) -> list[int]:
@@ -130,6 +153,30 @@ def _bench_prefill_cache_policies(value: str) -> tuple[str, ...]:
     return (value,)
 
 
+def _add_profile_argument(parser: argparse.ArgumentParser, *, default: str = "default") -> None:
+    parser.add_argument(
+        "--profile",
+        choices=tuple(RUNTIME_PROFILES),
+        default=default,
+        help="runtime preset for local inference defaults",
+    )
+
+
+def _resolve_profile_defaults(args: argparse.Namespace) -> None:
+    profile = RUNTIME_PROFILES[getattr(args, "profile", "default")]
+    for name in (
+        "prefill_step_size",
+        "prefill_cache_policy",
+        "prefill_sync_policy",
+        "prefill_sync_every",
+        "prefill_cache_clear_every",
+        "decode_variant",
+        "max_sessions",
+    ):
+        if hasattr(args, name) and getattr(args, name) is None:
+            setattr(args, name, getattr(profile, name))
+
+
 def _print_chat_stats(result) -> None:
     stats = result.stats
     print(
@@ -143,6 +190,7 @@ def _print_chat_stats(result) -> None:
 
 
 def _run_chat(args) -> int:
+    _resolve_profile_defaults(args)
     try:
         engine = Gemma4Engine(
             model_path=args.model,
@@ -221,6 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
         "infer",
         description='Run one prompt. Example: gemma4 infer --prompt "Say hi."',
     )
+    _add_profile_argument(infer_parser)
     infer_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
     infer_parser.add_argument("--prompt", required=True)
     infer_parser.add_argument("--max-tokens", type=int, default=128)
@@ -229,28 +278,28 @@ def build_parser() -> argparse.ArgumentParser:
     infer_parser.add_argument(
         "--prefill-step-size",
         choices=["auto", "512", "1024", "2048", "4096", "8192"],
-        default="auto",
+        default=None,
     )
     infer_parser.add_argument(
         "--prefill-cache-policy",
         choices=["clear", "retain", "periodic", "threshold"],
-        default="clear",
+        default=None,
         help="clear MLX allocator cache after prefill chunks, or retain it for high-memory speed tests",
     )
     infer_parser.add_argument(
         "--prefill-sync-policy",
         choices=["eval", "async", "none", "periodic"],
-        default="eval",
+        default=None,
         help="synchronize MLX prompt-cache states after each prefill chunk",
     )
-    infer_parser.add_argument("--prefill-sync-every", type=_positive_int, default=4)
-    infer_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=8)
+    infer_parser.add_argument("--prefill-sync-every", type=_positive_int, default=None)
+    infer_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=None)
     infer_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     infer_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     infer_parser.add_argument("--kv-group-size", type=int, default=64)
     infer_parser.add_argument("--quantized-kv-start", type=int, default=0)
     infer_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
-    infer_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default="custom")
+    infer_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default=None)
     infer_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
     infer_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
     infer_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
@@ -334,39 +383,40 @@ def build_parser() -> argparse.ArgumentParser:
         "serve",
         description="Start the persistent /generate JSON service. Example: gemma4 serve",
     )
+    _add_profile_argument(serve_parser)
     serve_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
     serve_parser.add_argument("--backend", choices=["mlx", "auto"], default="auto")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)
     serve_parser.add_argument("--enable-sessions", action="store_true")
-    serve_parser.add_argument("--max-sessions", type=_positive_int, default=8)
+    serve_parser.add_argument("--max-sessions", type=_positive_int, default=None)
     serve_parser.add_argument("--max-tokens", type=int, default=128)
     serve_parser.add_argument("--prompt-mode", choices=["chat", "raw"], default="chat")
     serve_parser.add_argument(
         "--prefill-step-size",
         choices=["auto", "512", "1024", "2048", "4096", "8192"],
-        default="auto",
+        default=None,
     )
     serve_parser.add_argument(
         "--prefill-cache-policy",
         choices=["clear", "retain", "periodic", "threshold"],
-        default="clear",
+        default=None,
         help="clear MLX allocator cache after prefill chunks, or retain it for high-memory speed tests",
     )
     serve_parser.add_argument(
         "--prefill-sync-policy",
         choices=["eval", "async", "none", "periodic"],
-        default="eval",
+        default=None,
         help="synchronize MLX prompt-cache states after each prefill chunk",
     )
-    serve_parser.add_argument("--prefill-sync-every", type=_positive_int, default=4)
-    serve_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=8)
+    serve_parser.add_argument("--prefill-sync-every", type=_positive_int, default=None)
+    serve_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=None)
     serve_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     serve_parser.add_argument("--kv-bits", type=int, choices=[2, 4, 8], default=None)
     serve_parser.add_argument("--kv-group-size", type=int, default=64)
     serve_parser.add_argument("--quantized-kv-start", type=int, default=0)
     serve_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
-    serve_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default="custom")
+    serve_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default=None)
     serve_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
     serve_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
     serve_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
@@ -393,6 +443,7 @@ def build_parser() -> argparse.ArgumentParser:
         "chat",
         description="Interactive single-user chat. Commands: /reset, /stats, /exit",
     )
+    _add_profile_argument(chat_parser, default="single_user_fast")
     chat_parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
     chat_parser.add_argument("--backend", choices=["mlx", "auto"], default="auto")
     chat_parser.add_argument("--max-tokens", type=int, default=128)
@@ -400,28 +451,28 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument(
         "--prefill-step-size",
         choices=["auto", "512", "1024", "2048", "4096", "8192"],
-        default="auto",
+        default=None,
     )
     chat_parser.add_argument(
         "--prefill-cache-policy",
         choices=["clear", "retain", "periodic", "threshold"],
-        default="retain",
+        default=None,
     )
     chat_parser.add_argument(
         "--prefill-sync-policy",
         choices=["eval", "async", "none", "periodic"],
-        default="async",
+        default=None,
     )
-    chat_parser.add_argument("--prefill-sync-every", type=_positive_int, default=4)
-    chat_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=8)
+    chat_parser.add_argument("--prefill-sync-every", type=_positive_int, default=None)
+    chat_parser.add_argument("--prefill-cache-clear-every", type=_positive_int, default=None)
     chat_parser.add_argument("--prefill-cache-threshold-gb", type=_positive_float, default=None)
     chat_parser.add_argument("--max-kv-size", type=_positive_int, default=None)
-    chat_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default="custom")
+    chat_parser.add_argument("--decode-variant", choices=_decode_variant_choices(), default=None)
     chat_parser.add_argument("--speculative-ngram-min", type=_positive_int, default=3)
     chat_parser.add_argument("--speculative-ngram-max", type=_positive_int, default=6)
     chat_parser.add_argument("--speculative-draft-tokens", type=_positive_int, default=4)
     chat_parser.add_argument("--session-id", default="chat")
-    chat_parser.add_argument("--max-sessions", type=_positive_int, default=4)
+    chat_parser.add_argument("--max-sessions", type=_positive_int, default=None)
     chat_parser.add_argument("--token-cache-dir", default=DEFAULT_TOKEN_CACHE_DIR, type=_optional_cache_dir)
     chat_parser.add_argument("--mlx-memory-limit-gb", type=_positive_float, default=None)
     chat_parser.add_argument("--mlx-cache-limit-gb", type=_positive_float, default=None)
@@ -432,6 +483,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    _resolve_profile_defaults(args)
 
     if args.command == "infer":
         try:
